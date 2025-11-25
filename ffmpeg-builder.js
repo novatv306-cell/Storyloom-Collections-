@@ -10,6 +10,18 @@
  */
 
 /**
+ * Escapes single quotes and newlines for FFmpeg drawtext filter safety.
+ * This function ensures FFmpeg handles text like "Storyloom's" correctly.
+ * @param {string} text 
+ * @returns {string} The escaped text.
+ */
+function escapeDrawText(text) {
+    if (!text) return '';
+    // Replace ' with '\' to escape the quote inside FFmpeg's single-quoted argument, and replace newlines.
+    return text.replace(/'/g, "'\\''").replace(/\n/g, '\\n');
+}
+
+/**
  * Builds the complete FFmpeg command string by parsing the complex videoData object.
  *
  * @param {VideoData} videoData
@@ -54,7 +66,7 @@ function buildFFmpegCommand(videoData) {
       filterComplex.push(`color=c=black:s=1920x1080:d=${sceneDuration}[bg${sceneIdx}]`);
     }
 
-    // Character Inputs
+    // Character Inputs (unchanged)
     const sceneCharacterInputs = [];
     for (const charName of scene.characters || []) {
       const character = characters.find(c => c.name === charName);
@@ -68,7 +80,7 @@ function buildFFmpegCommand(videoData) {
       }
     }
 
-    // Dialogue Audio Inputs
+    // Dialogue Audio Inputs (unchanged)
     const dialogueAudioInputs = [];
     let sceneAudioDuration = 0;
     for (const dialogue of scene.dialogue || []) {
@@ -94,7 +106,7 @@ function buildFFmpegCommand(videoData) {
       );
     }
 
-    // Overlay characters
+    // Overlay characters (unchanged)
     sceneCharacterInputs.forEach((charInput, charIdx) => {
       const xPos = 300 + (charIdx * 400); 
       const yPos = 400; 
@@ -109,22 +121,22 @@ function buildFFmpegCommand(videoData) {
       currentOverlay = overlayName;
     });
 
-    // Add scene text overlay
+    // Add scene text overlay - USING THE NEW ESCAPE FUNCTION
     if (scene.description) {
       const textOverlayName = `scene${sceneIdx}_text_overlay`;
-      const escapedText = scene.description.replace(/'/g, "'\\''").substring(0, 100);
+      const escapedText = escapeDrawText(scene.description.substring(0, 100)); // Limit to 100 chars
       filterComplex.push(
         `[${currentOverlay}]drawtext=text='${escapedText}':fontcolor=white:fontsize=24:x=(w-text_w)/2:y=50:box=1:boxcolor=black@0.5:boxborderw=5[${textOverlayName}]`
       );
       currentOverlay = textOverlayName;
     }
 
-    // Trim and set PTS
+    // Trim and set PTS (unchanged)
     filterComplex.push(
       `[${currentOverlay}]trim=duration=${sceneDuration},setpts=PTS-STARTPTS[scene${sceneIdx}_video]`
     );
 
-    // Mix dialogue audio
+    // Mix dialogue audio (unchanged)
     if (dialogueAudioInputs.length > 0) {
       const audioMixInputs = dialogueAudioInputs.map(d => `[${d.inputIndex}:a]`).join('');
       filterComplex.push(
@@ -145,22 +157,24 @@ function buildFFmpegCommand(videoData) {
 
   // --- Step 3-8: Final Concatenation, Mixing, and Assembly ---
   
-  // Concatenate all scenes
+  // Concatenate all scenes (unchanged)
   const concatVideoInputs = sceneSegments.map(s => `[${s.video}]`).join('');
   const concatAudioInputs = sceneSegments.map(s => `[${s.audio}]`).join('');
   filterComplex.push(`${concatVideoInputs}concat=n=${sceneSegments.length}:v=1:a=0[main_video_temp]`);
   filterComplex.push(`${concatAudioInputs}concat=n=${sceneSegments.length}:v=0:a=1[main_audio_temp]`);
 
-  // Add Credits
+  // Add Credits - USING THE NEW ESCAPE FUNCTION
   const creditsDuration = 5;
-  const creditsText = `Directed by ${credits.director}\\nAnimated by ${credits.animator}`; 
+  const rawCreditsText = `Directed by ${credits.director}\nAnimated by ${credits.animator}`;
+  const escapedCreditsText = escapeDrawText(rawCreditsText); // <-- FIX APPLIED HERE
+
   filterComplex.push(`color=c=black:s=1920x1080:d=${creditsDuration}[credits_bg]`);
-  filterComplex.push(`[credits_bg]drawtext=text='${creditsText.replace(/\n/g, '\\n')}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=20[credits_video]`);
+  filterComplex.push(`[credits_bg]drawtext=text='${escapedCreditsText}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=20[credits_video]`);
   filterComplex.push(`anullsrc=channel_layout=stereo:sample_rate=44100:duration=${creditsDuration}[credits_audio]`);
   filterComplex.push(`[main_video_temp][credits_video]concat=n=2:v=1:a=0[video_with_credits]`);
   filterComplex.push(`[main_audio_temp][credits_audio]concat=n=2:v=0:a=1[audio_with_credits]`);
 
-  // Add Logo
+  // Add Logo (unchanged)
   let finalVideo = 'video_with_credits';
   let finalAudio = 'audio_with_credits';
   if (logoInputIndex >= 0) {
@@ -170,7 +184,7 @@ function buildFFmpegCommand(videoData) {
     finalAudio = 'audio_final_pre';
   }
 
-  // Mix Background Music
+  // Mix Background Music (unchanged)
   if (musicInputIndex >= 0) {
     filterComplex.push(
       `[${finalAudio}][${musicInputIndex}:a]amix=inputs=2:duration=first:dropout_transition=2[audio_final]`
@@ -178,7 +192,7 @@ function buildFFmpegCommand(videoData) {
     finalAudio = 'audio_final';
   }
   
-  // Assemble Final Command String
+  // Assemble Final Command String (unchanged)
   command += ' ' + inputs.join(' ');
   command += ` -filter_complex "${filterComplex.join(';')}"`;
   command += ` -map "[${finalVideo}]" -map "[${finalAudio}]"`;
