@@ -6,14 +6,14 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PORT = process.env.PORT || 3000;
 
 // *******************************************************************
-// *** CRITICAL FIX: CONFIGURE DATABASE NAMES HERE ***
+// *** CRITICAL FIX: CONFIGURED BASED ON YOUR LATEST FEEDBACK ***
 // *******************************************************************
 
-// 1. SET THIS TO THE TABLE THAT HOLDS THE SCRIPT DETAILS AND STATUS. (Must be 'story_scripts')
+// 1. Enter the EXACT name of your table (Assuming standard pattern: 'story_scripts')
 const SUPABASE_TABLE_NAME = 'story_scripts'; 
 
-// 2. SET THIS TO THE EXACT name of the JSON column that holds your video script data (e.g., 'script_story', 'video_data')
-const VIDEO_DATA_COLUMN_NAME = 'script_story'; 
+// 2. Enter the EXACT name of the JSON column that holds your video script data (You confirmed: 'story_script')
+const VIDEO_DATA_COLUMN_NAME = 'story_script'; 
 
 // *******************************************************************
 
@@ -31,9 +31,9 @@ async function updateJobStatus(scriptId, videoData, status) {
     const payload = { 
         id: scriptId,
         status: status, 
-        progress_percentage: 0.0, // This is the new column we added
+        progress_percentage: 0.0, // The new column we added
         
-        // Mandatory fields that must exist in the SUPABASE_TABLE_NAME
+        // Mandatory fields to prevent the 400 error:
         title: videoData.title || "Untitled Video",
         full_script: videoData.full_script || "Script data missing.",
         environment_tag: videoData.environment_tag || "2D",
@@ -43,7 +43,6 @@ async function updateJobStatus(scriptId, videoData, status) {
     // Dynamically assign the video data to the correct column name
     payload[VIDEO_DATA_COLUMN_NAME] = videoData;
 
-    // Log the payload being sent for debugging
     console.log(`Attempting to send payload to Supabase table ${SUPABASE_TABLE_NAME} for script ${scriptId}...`);
 
     try {
@@ -93,6 +92,3 @@ app.post('/render', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Storyloom Web Queue is Ready'));
 app.listen(PORT, () => console.log(`Web Queue Listening on port ${PORT}`));
-
-
-This should fix the table lookup issue and the column lookup issue simultaneously. Let's get that deploy successful!
