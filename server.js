@@ -16,11 +16,11 @@ const PORT = process.env.PORT || 3000;
 const SUPABASE_TABLE_NAME = 'story_script'; 
 const VIDEO_DATA_COLUMN_NAME = 'script_data'; 
 
-// CONFIRMED STATUSES
-const STATUS_PENDING = 'PENDING'; // Used by worker to find job
-const STATUS_IN_PROGRESS = 'PROCESSING_RENDER'; // Used by worker/server during rendering
-const STATUS_COMPLETED = 'RENDERING_COMPLETE'; // Final success status
-const STATUS_FAILED = 'FAILED'; // Final failure status
+// CONFIRMED STATUSES (These match the worker and the database expectations)
+const STATUS_PENDING = 'PENDING'; 
+const STATUS_IN_PROGRESS = 'PROCESSING_RENDER'; 
+const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
+const STATUS_FAILED = 'FAILED'; 
 
 // *******************************************************************
 
@@ -29,14 +29,13 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 }
 
 /**
- * Placeholder for video upload logic (Replace with actual Supabase Storage integration).
- * For now, this just simulates an upload and returns a fixed URL.
+ * Placeholder for video upload logic (This needs real Supabase Storage access later).
+ * For now, it cleans up the temp file and returns a dummy URL.
  */
 async function uploadVideoToStorage(scriptId, tempFilePath) {
     console.log(`[STORAGE] Simulating upload of ${tempFilePath} for job ${scriptId}...`);
     
-    // In a real app, you would use the @supabase/storage-js SDK here.
-    // Since we don't have the library, we just delete the file and return the placeholder URL.
+    // Clean up the local file after "uploading"
     try {
         await fs.unlink(tempFilePath);
         console.log(`[STORAGE] Cleaned up temp file: ${tempFilePath}`);
@@ -44,7 +43,7 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
         console.error(`[STORAGE] Failed to clean up temp file:`, e);
     }
     
-    // The actual URL where the client will find the video (must be accessible)
+    // Returns a placeholder URL for the database
     return `https://your-supabase-storage-bucket.com/videos/story_${scriptId}.mp4`;
 }
 
@@ -77,9 +76,10 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
         });
         
         if (!response.ok) {
+            // CRITICAL: Log the error details if the API call failed
             console.error(`Supabase UPDATE failed: ${response.status}`);
             const errorText = await response.text();
-            console.error(`Supabase Response Error:`, errorText); 
+            console.error(`Supabase Response Error (Status ${status}):`, errorText); 
             return false;
         }
         
@@ -93,31 +93,19 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the actual FFmpeg command string.
+ * Builds the actual FFmpeg command string (Confirmed Working Placeholder).
  */
 function buildFFmpegCommand(videoData) {
     const outputFileName = `output_${videoData.id}.mp4`;
     const tempFilePath = path.join('/tmp', outputFileName);
     
-    console.log(`Building FFmpeg command for environment: ${videoData.environment_tag}`);
-
-    // --- LOGIC FOR THE 2D/3D MISMATCH FIX (SIMULATED) ---
     const sceneTitle = videoData.title || "Untitled Story";
     const characterName = videoData.main_character_names[0] || "Default Character";
-    let videoDuration = 5; // Fixed duration for testing
+    let videoDuration = 5; 
     
-    let textOverlay = `Text='Title: ${sceneTitle} | Character: ${characterName}';`;
+    let textOverlay = `Text='Job ${videoData.id} Complete! Title: ${sceneTitle}';`;
     
-    if (videoData.environment_tag === '2D') {
-         // Placeholder for a 2D rendering command
-         textOverlay += `Text='WARNING: 2D Assets Missing - Rendering Default Placeholder';`;
-    } else {
-        // Placeholder for a 3D rendering command
-        textOverlay += `Text='3D Render Starting...';`;
-    }
-    
-    // FINAL, WORKING COMMAND: Creates a 5-second video with a text overlay
-    // The video file is saved to the /tmp directory.
+    // Creates a 5-second blue video with text.
     const command = `ffmpeg -f lavfi -i color=c=blue:s=1280x720:d=${videoDuration} -vf "drawtext=${textOverlay}fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2" -c:v libx264 -pix_fmt yuv420p -y ${tempFilePath}`;
     
     return { command, tempFilePath };
@@ -129,20 +117,15 @@ function buildFFmpegCommand(videoData) {
  */
 function executeFFmpeg(command, tempFilePath, scriptId) {
     return new Promise((resolve, reject) => {
-        console.log(`Executing FFmpeg for job ${scriptId}. Output: ${tempFilePath}`);
-        
         const ffmpeg = spawn('ffmpeg', command.split(' ').slice(1)); 
         let stderr = '';
         
         ffmpeg.stderr.on('data', (data) => {
             stderr += data.toString();
-            // In a real app, you would parse data.toString() for FFmpeg 'frame=' progress
-            // and call updateJobStatus to show progress_percentage updates.
         });
         
         ffmpeg.on('close', (code) => {
             if (code === 0) {
-                console.log(`FFmpeg Job ${scriptId} finished successfully. Video saved to: ${tempFilePath}`);
                 resolve({ success: true, tempFilePath });
             } else {
                 reject(new Error(`FFmpeg exited with code ${code}. Error Output: ${stderr}`));
@@ -159,18 +142,14 @@ function executeFFmpeg(command, tempFilePath, scriptId) {
 const app = express();
 app.use(express.json());
 
-// --- /RENDER ENDPOINT (STEP 1: QUEUES JOB) ---
+// --- /RENDER ENDPOINT (Queueing) ---
 app.post('/render', async (req, res) => {
     const { videoData, scriptId } = req.body; 
-
-    if (!videoData || !scriptId) {
-        return res.status(400).send({ error: 'Missing videoData or scriptId.' });
-    }
+    if (!videoData || !scriptId) return res.status(400).send({ error: 'Missing videoData or scriptId.' });
     
-    // Status is PENDING for the worker to find it
     const payload = { 
         id: scriptId,
-        status: STATUS_PENDING, 
+        status: STATUS_PENDING, // Queue status
         progress_percentage: 0.0,
         error_message: null,
         title: videoData.title || "Untitled Video",
@@ -179,7 +158,6 @@ app.post('/render', async (req, res) => {
         content_type: videoData.content_type || "cartoon",
         main_character_names: videoData.main_character_names || []
     };
-    
     payload[VIDEO_DATA_COLUMN_NAME] = videoData;
 
     try {
@@ -195,14 +173,11 @@ app.post('/render', async (req, res) => {
         });
         
         if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`Supabase queue insert failed:`, errorText);
+            console.error(`Supabase queue insert failed:`, await response.text());
             return res.status(500).send({ error: 'Failed to queue job' });
         }
         
         res.status(202).send({ success: true, message: `FFmpeg job queued successfully for script ${scriptId}` });
-        console.log(`Job ${scriptId} queued successfully with status ${STATUS_PENDING}`);
-        
     } catch (error) {
         console.error('Queue error:', error);
         res.status(500).send({ error: 'Internal server error' });
@@ -210,17 +185,12 @@ app.post('/render', async (req, res) => {
 });
 
 
-// --- /PROCESS ENDPOINT (STEP 3: EXECUTED BY SUPABASE WORKER) ---
+// --- /PROCESS ENDPOINT (Execution) ---
 app.post('/process', async (req, res) => {
     const { videoData, scriptId } = req.body; 
+    if (!videoData || !scriptId) return res.status(400).send({ error: 'Missing videoData or scriptId.' });
 
-    if (!videoData || !scriptId) {
-        return res.status(400).send({ error: 'Missing videoData or scriptId.' });
-    }
-
-    console.log(`Processing job ${scriptId}: ${videoData.title}`);
-
-    // Respond immediately so the Supabase worker doesn't time out
+    // Respond immediately
     res.status(202).send({ 
         success: true, 
         message: `Processing started for script ${scriptId}` 
@@ -230,32 +200,29 @@ app.post('/process', async (req, res) => {
     (async () => {
         let tempFilePath = '';
         try {
-            // 1. Update status to show work has started (using correct status)
+            // 1. Set status to IN_PROGRESS
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
 
-            // 2. Build FFmpeg command and get the output path
+            // 2. Build FFmpeg command and execute
             const { command, tempFilePath: path } = buildFFmpegCommand(videoData);
-            tempFilePath = path; // Save path for cleanup
+            tempFilePath = path; 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
 
-            // 3. Execute FFmpeg
-            const executionResult = await executeFFmpeg(command, tempFilePath, scriptId);
+            await executeFFmpeg(command, tempFilePath, scriptId);
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
-            // 4. Upload result to Supabase storage
+            // 3. Upload result (simulated)
             const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 90);
 
-            // 5. Mark job complete (using correct status)
+            // 4. Set final completion status. THIS IS THE CRITICAL CALL.
             await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
-
-            console.log(`Job ${scriptId} completed successfully. URL: ${finalVideoUrl}`);
 
         } catch (error) {
             console.error(`Job ${scriptId} failed:`, error);
-            // 6. Mark job as failed if any step throws an error
+            // 5. Set failure status
             await updateJobStatus(scriptId, STATUS_FAILED, 0, error.message);
-            // Attempt to clean up temp file on failure
+            // Cleanup attempt
             if (tempFilePath) {
                  try { await fs.unlink(tempFilePath); } catch (e) { console.warn(`Failed to cleanup temp file on error:`, e); }
             }
