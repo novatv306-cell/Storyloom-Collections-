@@ -6,13 +6,13 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PORT = process.env.PORT || 3000;
 
 // *******************************************************************
-// *** FINAL FIX: COLUMN NAME IS DISTINCT FROM TABLE NAME ***
+// *** FINAL CONFIRMED CONFIGURATION (NO MORE NAME CHANGES NEEDED) ***
 // *******************************************************************
 
-// 1. Table Name: 'story_script' (Singular - CONFIRMED)
+// 1. Table Name (The collection of scripts)
 const SUPABASE_TABLE_NAME = 'story_script'; 
 
-// 2. Column Name: 'script_data' (Renamed in Supabase to avoid conflict)
+// 2. Column Name (The JSON data field - RENAMED in Supabase to 'script_data')
 const VIDEO_DATA_COLUMN_NAME = 'script_data'; 
 
 // *******************************************************************
@@ -33,14 +33,17 @@ async function updateJobStatus(scriptId, videoData, status) {
         status: status, 
         progress_percentage: 0.0,
         
-        // Mandatory fields to prevent the 400 error:
+        // Mandatory fields required by the database structure:
         title: videoData.title || "Untitled Video",
         full_script: videoData.full_script || "Script data missing.",
         environment_tag: videoData.environment_tag || "2D",
         content_type: videoData.content_type || "cartoon",
+        
+        // *** FINAL FIX: Adding the required 'main_character_names' array ***
+        main_character_names: videoData.main_character_names || [], // Must be an array
     };
     
-    // Dynamically assign the video data to the new column name ('script_data')
+    // Dynamically assign the video data to the column name ('script_data')
     payload[VIDEO_DATA_COLUMN_NAME] = videoData;
 
     console.log(`Attempting to send payload to Supabase table ${SUPABASE_TABLE_NAME} for script ${scriptId}...`);
