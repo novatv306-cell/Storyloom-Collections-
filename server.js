@@ -187,4 +187,69 @@ app.post('/render', async (req, res) => {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'apikey': SUPABASE_SERVICE_KEY
+                'apikey': SUPABASE_SERVICE_KEY,
+                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+                'Prefer': 'resolution=merge-duplicates'
+            },
+            body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+            console.error(`Supabase queue insert failed:`, await response.text());
+            return res.status(500).send({ error: 'Failed to queue job' });
+        }
+        
+        res.status(202).send({ success: true, message: `FFmpeg job queued successfully for script ${scriptId}` });
+    } catch (error) {
+        console.error('Queue error:', error);
+        res.status(500).send({ error: 'Internal server error' });
+    }
+});
+
+
+// --- /PROCESS ENDPOINT (Execution) ---
+app.post('/process', async (req, res) => {
+    const { videoData, scriptId } = req.body; 
+    if (!videoData || !scriptId) return res.status(400).send({ error: 'Missing videoData or scriptId.' });
+
+    res.status(202).send({ 
+        success: true, 
+        message: `Processing started for script ${scriptId}` 
+    });
+
+    // Start background processing
+    (async () => {
+        let tempFilePath = '';
+        try {
+            // 1. Set status to IN_PROGRESS
+            await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
+
+            if (DEBUG_SKIP_PROCESSING) { return; }
+            
+            // 2. Build FFmpeg command arguments and execute
+            const { args, tempFilePath: path } = buildFFmpegCommand(videoData);
+            tempFilePath = path; 
+            await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
+
+            await executeFFmpeg(args, tempFilePath, scriptId); 
+            await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
+
+            // 3. Upload result (simulated)
+            const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
+            await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 90);
+
+            // 4. Set final completion status.
+            await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
+
+        } catch (error) {
+            console.error(`Job ${scriptId} failed:`, error);
+            // 5. Set failure status
+            await updateJobStatus(scriptId, STATUS_FAILED, 0, error.message);
+            // Re-run cleanup safely
+            await uploadVideoToStorage(scriptId, tempFilePath); 
+        }
+    })();
+});
+
+app.get('/', (req, res) => res.send('Storyloom Render Server Ready'));
+app.listen(PORT, () => console.log(`Render Server listening on port ${PORT}`));
