@@ -126,7 +126,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the FFmpeg command to create a blue screen with a black bar overlay.
+ * Builds the FFmpeg command using a complex filter graph to overlay an image for captions.
  */
 function buildFFmpegCommand(videoData) {
     if (!videoData) {
@@ -138,23 +138,23 @@ function buildFFmpegCommand(videoData) {
     const tempFilePath = path.join('/tmp', outputFileName);
     const videoDuration = 5; 
     
-    console.log(`Generating OVERLAY TEST command for Job ${scriptId}. Testing complex filter chain.`);
+    // --- CRITICAL CHANGE: Using a remote image URL for the caption bar placeholder ---
+    // This image is a solid black 1280x100 PNG, serving as our caption bar.
+    // FFmpeg must download this file using its internal network capabilities.
+    const captionImageUrl = 'https://placehold.co/1280x100/000000/000000.png'; 
     
-    // --- FFmpeg Filter Graph Approach ---
-    // [0]: Main input stream (blue screen)
-    // [1]: Overlay input stream (black bar)
+    console.log(`Generating FINAL ARCHITECTURE TEST command for Job ${scriptId}. Overlaying caption image from URL.`);
     
     const args = [
-        // Input 0: Blue background for 5 seconds (1280x720)
+        // Input 0: Main Video Stream (Blue Screen Placeholder)
         '-f', 'lavfi',
-        '-i', `color=c=blue:s=1280x720:d=${videoDuration}`,
+        '-i', `color=c=blue:s=1280x720:d=${videoDuration}`, 
         
-        // Input 1: Black bar for 5 seconds (1280x100)
-        '-f', 'lavfi',
-        '-i', `color=c=black:s=1280x100:d=${videoDuration}`,
+        // Input 1: Caption Image URL (FFmpeg will download this image during processing)
+        '-i', captionImageUrl, 
         
-        // Filter Complex: Overlay the black bar (Input 1) onto the blue background (Input 0)
-        // x=0, y=main_height - overlay_height (i.e., put it at the bottom)
+        // Filter Complex: Overlay the caption image (Input 1) onto the main video (Input 0)
+        // x=0:y=H-h means placing the image at the bottom edge.
         '-filter_complex', '[0][1]overlay=x=0:y=H-h[v]', 
         '-map', '[v]', // Map the final video stream
         
