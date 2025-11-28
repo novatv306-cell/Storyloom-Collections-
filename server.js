@@ -40,7 +40,6 @@ async function cleanupTempFile(tempFilePath) {
     if (tempFilePath) {
         try {
             // Upload simulation happens first (even on failure, to clean up the local file)
-            // Note: Uses the part of the filename for scriptId extraction
             const scriptId = path.basename(tempFilePath).split('_')[1].split('.')[0];
             finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         } catch (e) {
@@ -114,7 +113,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the FFmpeg command with basic text overlay.
+ * Builds the FFmpeg command to create a blue screen with a black bar overlay.
  */
 function buildFFmpegCommand(videoData) {
     if (!videoData) {
@@ -124,27 +123,30 @@ function buildFFmpegCommand(videoData) {
     const scriptId = videoData.id || Date.now();
     const outputFileName = `output_${scriptId}.mp4`;
     const tempFilePath = path.join('/tmp', outputFileName);
-    
-    const sceneTitle = videoData.title || "Untitled Story";
     const videoDuration = 5; 
     
-    // Combine the title text
-    const textContent = `Job ${scriptId} | Title: ${sceneTitle}`;
+    console.log(`Generating OVERLAY TEST command for Job ${scriptId}. Testing complex filter chain.`);
     
-    // 1. Trim leading/trailing whitespace.
-    // 2. Replace every space with an escaped space (\ ) for FFmpeg's drawtext filter.
-    const escapedText = textContent.trim().replace(/ /g, '\\ ');
+    // --- FFmpeg Filter Graph Approach ---
+    // [0]: Main input stream (blue screen)
+    // [1]: Overlay input stream (black bar)
+    // [0][1]overlay: Overlay stream [1] onto stream [0]
     
-    // Using minimal drawtext settings to avoid font/size dependency issues
-    const drawtextFilter = `drawtext=text='${escapedText}':fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2`;
-
-    console.log(`Generating command for Job ${scriptId} with text: ${textContent}`);
-
-    // Define the arguments as a clean array.
     const args = [
+        // Input 0: Blue background for 5 seconds (1280x720)
         '-f', 'lavfi',
         '-i', `color=c=blue:s=1280x720:d=${videoDuration}`,
-        '-vf', drawtextFilter, 
+        
+        // Input 1: Black bar for 5 seconds (1280x100)
+        '-f', 'lavfi',
+        '-i', `color=c=black:s=1280x100:d=${videoDuration}`,
+        
+        // Filter Complex: Overlay the black bar (Input 1) onto the blue background (Input 0)
+        // x=0, y=main_height - overlay_height (i.e., put it at the bottom)
+        '-filter_complex', '[0][1]overlay=x=0:y=H-h[v]', 
+        '-map', '[v]', // Map the final video stream
+        
+        // Encoding
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv444p',
         '-y', // Overwrite output file if it exists
