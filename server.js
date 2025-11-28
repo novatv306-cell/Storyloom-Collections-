@@ -108,12 +108,15 @@ function buildFFmpegCommand(videoData) {
     const sceneTitle = videoData.title || "Untitled Story";
     let videoDuration = 5; 
     
-    // Combine the title text and escape all spaces for FFmpeg filter syntax.
+    // Combine the title text
     const textContent = `Job ${videoData.id} Complete! Title: ${sceneTitle}`;
-    // *** CRITICAL FIX: Replace every space with an escaped space (\ ) for FFmpeg's drawtext filter ***
-    const escapedText = textContent.replace(/ /g, '\\ ');
     
-    // Use the escaped text in the drawtext filter.
+    // *** FINAL FIX HERE (The one line that changed): 
+    // 1. Trim leading/trailing whitespace (in case title has spaces).
+    // 2. Replace every space with an escaped space (\ ) for FFmpeg's drawtext filter. ***
+    const escapedText = textContent.trim().replace(/ /g, '\\ ');
+    
+    // Use the now guaranteed clean escaped text in the drawtext filter.
     const drawtextFilter = `drawtext=text=${escapedText}:fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2`;
 
     // Define the arguments as a clean array.
