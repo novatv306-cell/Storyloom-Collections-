@@ -22,10 +22,10 @@ const STATUS_IN_PROGRESS = 'PROCESSING_RENDER';
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
-// --- TEMPORARY DEBUG FLAG ---
-// Set to 'true' to bypass FFmpeg and test RLS connectivity (Currently set to true)
-const DEBUG_SKIP_PROCESSING = true; 
-console.warn(`CRITICAL: DEBUG_SKIP_PROCESSING is set to ${DEBUG_SKIP_PROCESSING}. FFmpeg will be bypassed.`);
+// --- DEBUG FLAG IS NOW SET TO FALSE ---
+// This enables FFmpeg execution and attempts to create the video.
+const DEBUG_SKIP_PROCESSING = false; 
+console.log(`PRODUCTION MODE: DEBUG_SKIP_PROCESSING is set to ${DEBUG_SKIP_PROCESSING}. FFmpeg execution is ENABLED.`);
 
 // *******************************************************************
 
@@ -47,7 +47,7 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
         console.error(`[STORAGE] Failed to clean up temp file:`, e);
     }
     
-    // Returns a placeholder URL for the database
+    // Returns a placeholder URL for the database (replace with your real storage URL later)
     return `https://your-supabase-storage-bucket.com/videos/story_${scriptId}.mp4`;
 }
 
@@ -101,6 +101,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
  */
 function buildFFmpegCommand(videoData) {
     if (!videoData) {
+        // This is caught early in the /process route, but good for robustness
         throw new Error("videoData is missing or null for FFmpeg command builder.");
     }
 
@@ -115,7 +116,7 @@ function buildFFmpegCommand(videoData) {
     let textOverlay = `Text='Job ${videoData.id} Complete! Title: ${sceneTitle}';`;
     
     // Creates a 5-second blue video with text.
-    const command = `ffmpeg -f lavfi -i color=c=blue:s=1280x720:d=${videoDuration} -vf "drawtext=${textOverlay}fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2" -c:v libx264 -pix_fmt yuv420p -y ${tempFilePath}`;
+    const command = `ffmpeg -f lavfi -i color=c=blue:s=1280x720:d=${videoDuration} -vf "drawtext=${textOverlay}fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2" -c:v libx264 -pix_fmt yuv444p -y ${tempFilePath}`;
     
     return { command, tempFilePath };
 }
@@ -126,6 +127,8 @@ function buildFFmpegCommand(videoData) {
  */
 function executeFFmpeg(command, tempFilePath, scriptId) {
     return new Promise((resolve, reject) => {
+        console.log(`Executing FFmpeg command for job ${scriptId}...`);
+        // We slice(1) because the first element is 'ffmpeg' itself, and spawn expects the arguments separately
         const ffmpeg = spawn('ffmpeg', command.split(' ').slice(1)); 
         let stderr = '';
         
@@ -135,6 +138,7 @@ function executeFFmpeg(command, tempFilePath, scriptId) {
         
         ffmpeg.on('close', (code) => {
             if (code === 0) {
+                console.log(`FFmpeg Job ${scriptId} completed successfully.`);
                 resolve({ success: true, tempFilePath });
             } else {
                 reject(new Error(`FFmpeg exited with code ${code}. Error Output: ${stderr}`));
@@ -212,12 +216,9 @@ app.post('/process', async (req, res) => {
             // 1. Set status to IN_PROGRESS
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
 
-            // --- DEBUG MODE CHECK: Skip FFmpeg and go straight to success update ---
+            // --- PRODUCTION MODE CHECK: Run FFmpeg since DEBUG_SKIP_PROCESSING is false ---
             if (DEBUG_SKIP_PROCESSING) {
-                console.warn(`DEBUG: Bypassing FFmpeg/Upload steps and immediately attempting final status update.`);
-                const finalVideoUrl = `https://DEBUG-MODE-SUCCESS.com/videos/story_${scriptId}.mp4`;
-                // FINAL SUCCESS CALL - This is the RLS test
-                await updateJobStatus(scriptId, STATUS_COMPLETED, 100, "DEBUG MODE SUCCESS", finalVideoUrl);
+                // This section is skipped now!
                 return; 
             }
             // --- END DEBUG MODE CHECK ---
@@ -234,7 +235,7 @@ app.post('/process', async (req, res) => {
             const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 90);
 
-            // 4. Set final completion status. THIS IS THE CRITICAL CALL.
+            // 4. Set final completion status.
             await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
         } catch (error) {
