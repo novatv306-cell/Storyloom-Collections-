@@ -23,7 +23,6 @@ const STATUS_COMPLETED = 'RENDERING_COMPLETE';
 const STATUS_FAILED = 'FAILED'; 
 
 // --- DEBUG FLAG IS NOW SET TO FALSE ---
-// This enables FFmpeg execution and attempts to create the video.
 const DEBUG_SKIP_PROCESSING = false; 
 console.log(`PRODUCTION MODE: DEBUG_SKIP_PROCESSING is set to ${DEBUG_SKIP_PROCESSING}. FFmpeg execution is ENABLED.`);
 
@@ -44,7 +43,8 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
         await fs.unlink(tempFilePath);
         console.log(`[STORAGE] Cleaned up temp file: ${tempFilePath}`);
     } catch (e) {
-        console.error(`[STORAGE] Failed to clean up temp file:`, e);
+        // We expect this error if the FFmpeg job failed and didn't create the file
+        console.warn(`[STORAGE] Clean up warning: File not found at ${tempFilePath}. This is expected if FFmpeg failed early.`);
     }
     
     // Returns a placeholder URL for the database (replace with your real storage URL later)
@@ -80,7 +80,6 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
         });
         
         if (!response.ok) {
-            // CRITICAL: Log the error details if the API call failed
             console.error(`Supabase UPDATE failed: ${response.status}`);
             const errorText = await response.text();
             console.error(`Supabase Response Error (Status ${status}):`, errorText); 
@@ -97,11 +96,10 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the actual FFmpeg command string (Robust access added here).
+ * Builds the actual FFmpeg command arguments array (FIXED).
  */
 function buildFFmpegCommand(videoData) {
     if (!videoData) {
-        // This is caught early in the /process route, but good for robustness
         throw new Error("videoData is missing or null for FFmpeg command builder.");
     }
 
@@ -109,27 +107,35 @@ function buildFFmpegCommand(videoData) {
     const tempFilePath = path.join('/tmp', outputFileName);
     
     const sceneTitle = videoData.title || "Untitled Story";
-    // FIX: Using optional chaining (?.) to safely access array index 0
-    const characterName = videoData.main_character_names?.[0] || "Default Character";
     let videoDuration = 5; 
     
-    let textOverlay = `Text='Job ${videoData.id} Complete! Title: ${sceneTitle}';`;
+    // The entire drawtext filter must be a single string argument
+    const drawtextFilter = `drawtext=text='Job ${videoData.id} Complete! Title: ${sceneTitle}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2`;
+
+    // CRITICAL FIX: Define the arguments as a clean array.
+    const args = [
+        '-f', 'lavfi',
+        '-i', `color=c=blue:s=1280x720:d=${videoDuration}`,
+        '-vf', drawtextFilter, 
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv444p',
+        '-y', // Overwrite output file if it exists
+        tempFilePath // The final output path
+    ];
     
-    // Creates a 5-second blue video with text.
-    const command = `ffmpeg -f lavfi -i color=c=blue:s=1280x720:d=${videoDuration} -vf "drawtext=${textOverlay}fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2" -c:v libx264 -pix_fmt yuv444p -y ${tempFilePath}`;
-    
-    return { command, tempFilePath };
+    // We return 'args' instead of 'command'
+    return { args, tempFilePath };
 }
 
 
 /**
- * Executes the FFmpeg command in a child process.
+ * Executes the FFmpeg command in a child process (FIXED).
  */
-function executeFFmpeg(command, tempFilePath, scriptId) {
+function executeFFmpeg(args, tempFilePath, scriptId) {
     return new Promise((resolve, reject) => {
-        console.log(`Executing FFmpeg command for job ${scriptId}...`);
-        // We slice(1) because the first element is 'ffmpeg' itself, and spawn expects the arguments separately
-        const ffmpeg = spawn('ffmpeg', command.split(' ').slice(1)); 
+        console.log(`Executing FFmpeg command for job ${scriptId} with args:`, args);
+        // CRITICAL FIX: Pass the clean array of arguments directly to spawn
+        const ffmpeg = spawn('ffmpeg', args); 
         let stderr = '';
         
         ffmpeg.stderr.on('data', (data) => {
@@ -162,7 +168,7 @@ app.post('/render', async (req, res) => {
     
     const payload = { 
         id: scriptId,
-        status: STATUS_PENDING, // Queue status
+        status: STATUS_PENDING, 
         progress_percentage: 0.0,
         error_message: null,
         title: videoData.title || "Untitled Video",
@@ -203,7 +209,6 @@ app.post('/process', async (req, res) => {
     const { videoData, scriptId } = req.body; 
     if (!videoData || !scriptId) return res.status(400).send({ error: 'Missing videoData or scriptId.' });
 
-    // Respond immediately
     res.status(202).send({ 
         success: true, 
         message: `Processing started for script ${scriptId}` 
@@ -216,19 +221,15 @@ app.post('/process', async (req, res) => {
             // 1. Set status to IN_PROGRESS
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
 
-            // --- PRODUCTION MODE CHECK: Run FFmpeg since DEBUG_SKIP_PROCESSING is false ---
-            if (DEBUG_SKIP_PROCESSING) {
-                // This section is skipped now!
-                return; 
-            }
-            // --- END DEBUG MODE CHECK ---
+            if (DEBUG_SKIP_PROCESSING) { return; }
             
-            // 2. Build FFmpeg command and execute
-            const { command, tempFilePath: path } = buildFFmpegCommand(videoData);
+            // 2. Build FFmpeg command arguments and execute
+            const { args, tempFilePath: path } = buildFFmpegCommand(videoData);
             tempFilePath = path; 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
 
-            await executeFFmpeg(command, tempFilePath, scriptId);
+            // CRITICAL CHANGE: Pass 'args' array to executeFFmpeg
+            await executeFFmpeg(args, tempFilePath, scriptId); 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
             // 3. Upload result (simulated)
@@ -242,10 +243,8 @@ app.post('/process', async (req, res) => {
             console.error(`Job ${scriptId} failed:`, error);
             // 5. Set failure status
             await updateJobStatus(scriptId, STATUS_FAILED, 0, error.message);
-            // Cleanup attempt
-            if (tempFilePath) {
-                 try { await fs.unlink(tempFilePath); } catch (e) { console.warn(`Failed to cleanup temp file on error:`, e); }
-            }
+            // Re-run cleanup safely
+            await uploadVideoToStorage(scriptId, tempFilePath); 
         }
     })();
 });
