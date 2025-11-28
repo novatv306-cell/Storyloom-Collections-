@@ -10,7 +10,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PORT = process.env.PORT || 3000;
 
 // *******************************************************************
-// *** FINAL CONFIRMED CONFIGURATION & STATUSES ***
+// *** FINAL CONFIRMED CONFIGURATION AND STATUSES ***
 // *******************************************************************
 
 const SUPABASE_TABLE_NAME = 'story_script'; 
@@ -43,7 +43,6 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
         await fs.unlink(tempFilePath);
         console.log(`[STORAGE] Cleaned up temp file: ${tempFilePath}`);
     } catch (e) {
-        // We expect this error if the FFmpeg job failed and didn't create the file
         console.warn(`[STORAGE] Clean up warning: File not found at ${tempFilePath}. This is expected if FFmpeg failed early.`);
     }
     
@@ -109,10 +108,10 @@ function buildFFmpegCommand(videoData) {
     const sceneTitle = videoData.title || "Untitled Story";
     let videoDuration = 5; 
     
-    // The entire drawtext filter must be a single string argument
-    const drawtextFilter = `drawtext=text='Job ${videoData.id} Complete! Title: ${sceneTitle}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2`;
+    // *** CRITICAL FIX: Removed single quotes around the text value for drawtext syntax compliance ***
+    const drawtextFilter = `drawtext=text=Job ${videoData.id} Complete! Title: ${sceneTitle}:fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2`;
 
-    // CRITICAL FIX: Define the arguments as a clean array.
+    // Define the arguments as a clean array.
     const args = [
         '-f', 'lavfi',
         '-i', `color=c=blue:s=1280x720:d=${videoDuration}`,
@@ -123,7 +122,6 @@ function buildFFmpegCommand(videoData) {
         tempFilePath // The final output path
     ];
     
-    // We return 'args' instead of 'command'
     return { args, tempFilePath };
 }
 
@@ -134,7 +132,7 @@ function buildFFmpegCommand(videoData) {
 function executeFFmpeg(args, tempFilePath, scriptId) {
     return new Promise((resolve, reject) => {
         console.log(`Executing FFmpeg command for job ${scriptId} with args:`, args);
-        // CRITICAL FIX: Pass the clean array of arguments directly to spawn
+        // Pass the clean array of arguments directly to spawn
         const ffmpeg = spawn('ffmpeg', args); 
         let stderr = '';
         
@@ -228,7 +226,6 @@ app.post('/process', async (req, res) => {
             tempFilePath = path; 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
 
-            // CRITICAL CHANGE: Pass 'args' array to executeFFmpeg
             await executeFFmpeg(args, tempFilePath, scriptId); 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
