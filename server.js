@@ -51,12 +51,25 @@ async function cleanupTempFile(tempFilePath) {
 
 
 /**
- * Placeholder for video upload logic.
+ * Placeholder for video upload logic. READS FILE SIZE before cleaning up.
  */
 async function uploadVideoToStorage(scriptId, tempFilePath) {
     console.log(`[STORAGE] Simulating upload of ${tempFilePath} for job ${scriptId}...`);
     
-    // Clean up the local video file after "uploading"
+    // 1. Check the file size to confirm it's a valid video
+    try {
+        const stats = await fs.stat(tempFilePath);
+        console.log(`[STORAGE] SUCCESS: Video file created with size: ${stats.size} bytes.`);
+        if (stats.size === 0) {
+            console.error('[STORAGE] CRITICAL WARNING: File size is 0 bytes. Video is corrupted.');
+            throw new Error("Generated file size is zero.");
+        }
+    } catch (e) {
+        console.error(`[STORAGE] ERROR: Could not read stats for generated file at ${tempFilePath}.`, e.message);
+        throw e; // Re-throw to fail the job if the file is truly missing
+    }
+    
+    // 2. Clean up the local video file after "uploading"
     try {
         await fs.unlink(tempFilePath);
         console.log(`[STORAGE] Cleaned up temp video file: ${tempFilePath}`);
@@ -64,7 +77,7 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
         console.warn(`[STORAGE] Clean up warning: Video file not found at ${tempFilePath}. This is expected if FFmpeg failed early.`);
     }
     
-    // Returns a placeholder URL for the database (replace with your real storage URL later)
+    // 3. Returns the placeholder URL
     return `https://your-supabase-storage-bucket.com/videos/story_${scriptId}.mp4`;
 }
 
@@ -130,7 +143,6 @@ function buildFFmpegCommand(videoData) {
     // --- FFmpeg Filter Graph Approach ---
     // [0]: Main input stream (blue screen)
     // [1]: Overlay input stream (black bar)
-    // [0][1]overlay: Overlay stream [1] onto stream [0]
     
     const args = [
         // Input 0: Blue background for 5 seconds (1280x720)
@@ -261,7 +273,7 @@ app.post('/process', async (req, res) => {
             await executeFFmpeg(commandData.args, scriptId); 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
-            // 4. Upload result (simulated) and clean up temporary file
+            // 4. Upload result (simulated) and clean up temporary file, logging the size
             const finalVideoUrl = await cleanupTempFile(tempFilePath);
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 90);
 
