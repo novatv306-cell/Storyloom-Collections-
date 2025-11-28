@@ -40,7 +40,9 @@ async function cleanupTempFile(tempFilePath) {
     if (tempFilePath) {
         try {
             // Upload simulation happens first (even on failure, to clean up the local file)
-            finalVideoUrl = await uploadVideoToStorage(path.basename(tempFilePath).split('_')[1].split('.')[0], tempFilePath);
+            // Note: Uses the part of the filename for scriptId extraction
+            const scriptId = path.basename(tempFilePath).split('_')[1].split('.')[0];
+            finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         } catch (e) {
             console.warn(`[STORAGE] Upload failed/cleanup warning for video: ${e.message}`);
         }
@@ -112,7 +114,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the absolute minimal FFmpeg command (No Text, Blue Screen).
+ * Builds the FFmpeg command with basic text overlay.
  */
 function buildFFmpegCommand(videoData) {
     if (!videoData) {
@@ -122,15 +124,27 @@ function buildFFmpegCommand(videoData) {
     const scriptId = videoData.id || Date.now();
     const outputFileName = `output_${scriptId}.mp4`;
     const tempFilePath = path.join('/tmp', outputFileName);
+    
+    const sceneTitle = videoData.title || "Untitled Story";
     const videoDuration = 5; 
     
-    console.log(`Generating ABSOLUTE MINIMAL command for Job ${scriptId}. NO TEXT. Testing only blue screen output.`);
+    // Combine the title text
+    const textContent = `Job ${scriptId} | Title: ${sceneTitle}`;
     
+    // 1. Trim leading/trailing whitespace.
+    // 2. Replace every space with an escaped space (\ ) for FFmpeg's drawtext filter.
+    const escapedText = textContent.trim().replace(/ /g, '\\ ');
+    
+    // Using minimal drawtext settings to avoid font/size dependency issues
+    const drawtextFilter = `drawtext=text='${escapedText}':fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2`;
+
+    console.log(`Generating command for Job ${scriptId} with text: ${textContent}`);
+
     // Define the arguments as a clean array.
     const args = [
         '-f', 'lavfi',
         '-i', `color=c=blue:s=1280x720:d=${videoDuration}`,
-        // NO -vf (no video filters needed)
+        '-vf', drawtextFilter, 
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv444p',
         '-y', // Overwrite output file if it exists
