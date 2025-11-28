@@ -22,6 +22,11 @@ const STATUS_IN_PROGRESS = 'PROCESSING_RENDER';
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
+// --- TEMPORARY DEBUG FLAG ---
+// Set to 'true' to bypass FFmpeg and test RLS connectivity (Currently set to true)
+const DEBUG_SKIP_PROCESSING = true; 
+console.warn(`CRITICAL: DEBUG_SKIP_PROCESSING is set to ${DEBUG_SKIP_PROCESSING}. FFmpeg will be bypassed.`);
+
 // *******************************************************************
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -29,8 +34,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 }
 
 /**
- * Placeholder for video upload logic (This needs real Supabase Storage access later).
- * For now, it cleans up the temp file and returns a dummy URL.
+ * Placeholder for video upload logic.
  */
 async function uploadVideoToStorage(scriptId, tempFilePath) {
     console.log(`[STORAGE] Simulating upload of ${tempFilePath} for job ${scriptId}...`);
@@ -93,14 +97,19 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the actual FFmpeg command string (Confirmed Working Placeholder).
+ * Builds the actual FFmpeg command string (Robust access added here).
  */
 function buildFFmpegCommand(videoData) {
-    const outputFileName = `output_${videoData.id}.mp4`;
+    if (!videoData) {
+        throw new Error("videoData is missing or null for FFmpeg command builder.");
+    }
+
+    const outputFileName = `output_${videoData.id || Date.now()}.mp4`;
     const tempFilePath = path.join('/tmp', outputFileName);
     
     const sceneTitle = videoData.title || "Untitled Story";
-    const characterName = videoData.main_character_names[0] || "Default Character";
+    // FIX: Using optional chaining (?.) to safely access array index 0
+    const characterName = videoData.main_character_names?.[0] || "Default Character";
     let videoDuration = 5; 
     
     let textOverlay = `Text='Job ${videoData.id} Complete! Title: ${sceneTitle}';`;
@@ -203,6 +212,16 @@ app.post('/process', async (req, res) => {
             // 1. Set status to IN_PROGRESS
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
 
+            // --- DEBUG MODE CHECK: Skip FFmpeg and go straight to success update ---
+            if (DEBUG_SKIP_PROCESSING) {
+                console.warn(`DEBUG: Bypassing FFmpeg/Upload steps and immediately attempting final status update.`);
+                const finalVideoUrl = `https://DEBUG-MODE-SUCCESS.com/videos/story_${scriptId}.mp4`;
+                // FINAL SUCCESS CALL - This is the RLS test
+                await updateJobStatus(scriptId, STATUS_COMPLETED, 100, "DEBUG MODE SUCCESS", finalVideoUrl);
+                return; 
+            }
+            // --- END DEBUG MODE CHECK ---
+            
             // 2. Build FFmpeg command and execute
             const { command, tempFilePath: path } = buildFFmpegCommand(videoData);
             tempFilePath = path; 
