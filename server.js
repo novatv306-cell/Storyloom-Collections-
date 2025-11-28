@@ -95,10 +95,11 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
         final_video_url: final_video_url,
     };
     
-    console.log(`Updating Supabase job ${scriptId} to ${status} (${progress_percentage}%)...`);
+    const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}?id=eq.${scriptId}`;
+    console.log(`Updating Supabase job ${scriptId} to ${status} (${progress_percentage}%) via PATCH to: ${url}`);
 
     try {
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}?id=eq.${scriptId}`, {
+        const response = await fetch(url, {
             method: 'PATCH',
             headers: {
                 'Content-Type': 'application/json',
@@ -138,9 +139,7 @@ function buildFFmpegCommand(videoData) {
     const tempFilePath = path.join('/tmp', outputFileName);
     const videoDuration = 5; 
     
-    // --- CRITICAL CHANGE: Using a remote image URL for the caption bar placeholder ---
-    // This image is a solid black 1280x100 PNG, serving as our caption bar.
-    // FFmpeg must download this file using its internal network capabilities.
+    // Using a remote image URL for the caption bar placeholder
     const captionImageUrl = 'https://placehold.co/1280x100/000000/000000.png'; 
     
     console.log(`Generating FINAL ARCHITECTURE TEST command for Job ${scriptId}. Overlaying caption image from URL.`);
@@ -218,9 +217,13 @@ app.post('/render', async (req, res) => {
         main_character_names: videoData.main_character_names || []
     };
     payload[VIDEO_DATA_COLUMN_NAME] = videoData;
+    
+    // --- DIAGNOSTIC LOG: Print the URL being used for the POST insert
+    const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}`;
+    console.log(`Attempting POST insert to Supabase at: ${url}`);
 
     try {
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}`, {
+        const response = await fetch(url, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -232,7 +235,7 @@ app.post('/render', async (req, res) => {
         });
         
         if (!response.ok) {
-            console.error(`Supabase queue insert failed:`, await response.text());
+            console.error(`Supabase queue insert failed: ${response.status}`, await response.text());
             return res.status(500).send({ error: 'Failed to queue job' });
         }
         
