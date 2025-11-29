@@ -15,7 +15,8 @@ const PORT = process.env.PORT || 3000;
 
 const SUPABASE_TABLE_NAME = 'story_script'; 
 const VIDEO_DATA_COLUMN_NAME = 'script_data'; 
-const SUPABASE_STORAGE_BUCKET = 'story-videos'; // ASSUMPTION: Your bucket name is 'story-videos'
+// --- CRITICAL FIX APPLIED: Using the correct bucket name ---
+const SUPABASE_STORAGE_BUCKET = 'generated-content'; 
 
 const STATUS_PENDING = 'PENDING'; 
 const STATUS_IN_PROGRESS = 'PROCESSING_RENDER'; 
@@ -54,7 +55,6 @@ async function cleanupTempFile(tempFilePath) {
 
 /**
  * Uploads the video file to Supabase Storage and cleans up the local file.
- * This function is now performing the REAL upload.
  */
 async function uploadVideoToStorage(scriptId, tempFilePath) {
     const storagePath = `public/${scriptId}.mp4`;
@@ -230,6 +230,11 @@ app.use(express.json());
 
 // --- /RENDER ENDPOINT (Queueing) ---
 app.post('/render', async (req, res) => {
+    // *** DIAGNOSTIC STEP: Log the incoming data structure ***
+    console.log('--- Incoming Payload Diagnostic Start ---');
+    console.log('Incoming Payload:', JSON.stringify(req.body, null, 2));
+    console.log('--- Incoming Payload Diagnostic End ---');
+
     const { videoData, scriptId } = req.body; 
     if (!videoData || !scriptId) return res.status(400).send({ error: 'Missing videoData or scriptId.' });
     
