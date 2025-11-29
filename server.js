@@ -1,8 +1,10 @@
 const express = require('express');
-// CRITICAL: We need 'child_process' to run the FFmpeg command
 const { spawn } = require('child_process'); 
 const fs = require('fs/promises'); 
 const path = require('path');
+
+// --- Supabase Client Library Import ---
+const { createClient } = require('@supabase/supabase-js');
 
 // --- Configuration from Environment Variables ---
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -10,40 +12,40 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PORT = process.env.PORT || 3000;
 
 // *******************************************************************
-// *** FINAL CONFIRMED CONFIGURATION AND STATUSES ***
-// *******************************************************************
 
 const SUPABASE_TABLE_NAME = 'story_script'; 
 const VIDEO_DATA_COLUMN_NAME = 'script_data'; 
+const SUPABASE_STORAGE_BUCKET = 'story-videos'; // ASSUMPTION: Your bucket name is 'story-videos'
 
-// CONFIRMED STATUSES
 const STATUS_PENDING = 'PENDING'; 
 const STATUS_IN_PROGRESS = 'PROCESSING_RENDER'; 
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
-// --- DEBUG FLAG IS NOW SET TO FALSE ---
 const DEBUG_SKIP_PROCESSING = false; 
 console.log(`PRODUCTION MODE: DEBUG_SKIP_PROCESSING is set to ${DEBUG_SKIP_PROCESSING}. FFmpeg execution is ENABLED.`);
 
-// *******************************************************************
+// Initialize Supabase Client (Service Role for file uploads)
+const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY) 
+    : { storage: { from: () => ({ upload: () => Promise.reject(new Error('Supabase client not initialized')) }) } };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
     console.error("CRITICAL ERROR: Supabase credentials missing.");
 }
 
 /**
- * Handles cleanup of temporary files (video).
+ * Handles cleanup of temporary files (video) and uploads to Supabase Storage.
  */
 async function cleanupTempFile(tempFilePath) {
     let finalVideoUrl = null;
     if (tempFilePath) {
+        // We now attempt the real upload before cleanup
         try {
-            // Upload simulation happens first (even on failure, to clean up the local file)
             const scriptId = path.basename(tempFilePath).split('_')[1].split('.')[0];
             finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         } catch (e) {
-            console.warn(`[STORAGE] Upload failed/cleanup warning for video: ${e.message}`);
+            console.warn(`[STORAGE] Upload failed/cleanup warning: ${e.message}`);
         }
     }
     return finalVideoUrl;
@@ -51,34 +53,68 @@ async function cleanupTempFile(tempFilePath) {
 
 
 /**
- * Placeholder for video upload logic. READS FILE SIZE before cleaning up.
+ * Uploads the video file to Supabase Storage and cleans up the local file.
+ * This function is now performing the REAL upload.
  */
 async function uploadVideoToStorage(scriptId, tempFilePath) {
-    console.log(`[STORAGE] Simulating upload of ${tempFilePath} for job ${scriptId}...`);
+    const storagePath = `public/${scriptId}.mp4`;
+    let finalVideoUrl = null;
     
     // 1. Check the file size to confirm it's a valid video
     try {
         const stats = await fs.stat(tempFilePath);
-        console.log(`[STORAGE] SUCCESS: Video file created with size: ${stats.size} bytes.`);
+        console.log(`[STORAGE] FINAL CHECK: Video file size: ${stats.size} bytes.`);
         if (stats.size === 0) {
-            console.error('[STORAGE] CRITICAL WARNING: File size is 0 bytes. Video is corrupted.');
-            throw new Error("Generated file size is zero.");
+            throw new Error("Generated file size is zero. Not uploading.");
         }
+        
+        // 2. Read the file into a buffer
+        const videoBuffer = await fs.readFile(tempFilePath);
+
+        // 3. Upload to Supabase Storage
+        console.log(`[STORAGE] Starting REAL upload to bucket '${SUPABASE_STORAGE_BUCKET}' at path '${storagePath}'...`);
+        
+        const { data, error } = await supabase.storage
+            .from(SUPABASE_STORAGE_BUCKET)
+            .upload(storagePath, videoBuffer, {
+                contentType: 'video/mp4',
+                upsert: true,
+            });
+
+        if (error) {
+            throw new Error(`Supabase upload failed: ${error.message}`);
+        }
+
+        // 4. Get the public URL
+        const { data: publicUrlData } = supabase.storage
+            .from(SUPABASE_STORAGE_BUCKET)
+            .getPublicUrl(storagePath);
+
+        if (publicUrlData && publicUrlData.publicUrl) {
+            finalVideoUrl = publicUrlData.publicUrl;
+            console.log(`[STORAGE] SUCCESS: Video uploaded. Public URL: ${finalVideoUrl}`);
+        } else {
+            throw new Error('Could not retrieve public URL after upload.');
+        }
+
     } catch (e) {
-        console.error(`[STORAGE] ERROR: Could not read stats for generated file at ${tempFilePath}.`, e.message);
-        throw e; // Re-throw to fail the job if the file is truly missing
+        console.error(`[STORAGE] UPLOAD ERROR for job ${scriptId}:`, e.message);
+        // This log is critical if the Supabase client library is missing.
+        if (e.message.includes('createClient')) {
+            console.error("CRITICAL: The @supabase/supabase-js library may not be installed in your Render environment.");
+        }
+        throw e; 
     }
     
-    // 2. Clean up the local video file after "uploading"
+    // 5. Clean up the local video file
     try {
         await fs.unlink(tempFilePath);
         console.log(`[STORAGE] Cleaned up temp video file: ${tempFilePath}`);
     } catch (e) {
-        console.warn(`[STORAGE] Clean up warning: Video file not found at ${tempFilePath}. This is expected if FFmpeg failed early.`);
+        console.warn(`[STORAGE] Clean up warning: Video file not found at ${tempFilePath}.`);
     }
     
-    // 3. Returns the placeholder URL
-    return `https://your-supabase-storage-bucket.com/videos/story_${scriptId}.mp4`;
+    return finalVideoUrl;
 }
 
 
@@ -96,7 +132,6 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
     };
     
     const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}?id=eq.${scriptId}`;
-    console.log(`Updating Supabase job ${scriptId} to ${status} (${progress_percentage}%) via PATCH to: ${url}`);
 
     try {
         const response = await fetch(url, {
@@ -111,9 +146,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
         });
         
         if (!response.ok) {
-            console.error(`Supabase UPDATE failed: ${response.status}`);
-            const errorText = await response.text();
-            console.error(`Supabase Response Error (Status ${status}):`, errorText); 
+            console.error(`Supabase UPDATE failed: ${response.status}`, await response.text());
             return false;
         }
         
@@ -127,7 +160,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Builds the FFmpeg command using a complex filter graph to overlay an image for captions.
+ * Builds the FFmpeg command for the video.
  */
 function buildFFmpegCommand(videoData) {
     if (!videoData) {
@@ -139,21 +172,20 @@ function buildFFmpegCommand(videoData) {
     const tempFilePath = path.join('/tmp', outputFileName);
     const videoDuration = 5; 
     
-    // Using a remote image URL for the caption bar placeholder
+    // FINAL CONFIRMED ARCHITECTURE: Remote Image Overlay for the black caption bar
     const captionImageUrl = 'https://placehold.co/1280x100/000000/000000.png'; 
     
-    console.log(`Generating FINAL ARCHITECTURE TEST command for Job ${scriptId}. Overlaying caption image from URL.`);
+    console.log(`Generating FINAL PRODUCTION COMMAND for Job ${scriptId}. Caption Bar is being overlaid.`);
     
     const args = [
         // Input 0: Main Video Stream (Blue Screen Placeholder)
         '-f', 'lavfi',
         '-i', `color=c=blue:s=1280x720:d=${videoDuration}`, 
         
-        // Input 1: Caption Image URL (FFmpeg will download this image during processing)
+        // Input 1: Caption Image URL (FFmpeg will download this image)
         '-i', captionImageUrl, 
         
         // Filter Complex: Overlay the caption image (Input 1) onto the main video (Input 0)
-        // x=0:y=H-h means placing the image at the bottom edge.
         '-filter_complex', '[0][1]overlay=x=0:y=H-h[v]', 
         '-map', '[v]', // Map the final video stream
         
@@ -218,9 +250,7 @@ app.post('/render', async (req, res) => {
     };
     payload[VIDEO_DATA_COLUMN_NAME] = videoData;
     
-    // --- DIAGNOSTIC LOG: Print the URL being used for the POST insert
     const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}`;
-    console.log(`Attempting POST insert to Supabase at: ${url}`);
 
     try {
         const response = await fetch(url, {
@@ -276,11 +306,11 @@ app.post('/process', async (req, res) => {
             await executeFFmpeg(commandData.args, scriptId); 
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
-            // 4. Upload result (simulated) and clean up temporary file, logging the size
+            // 4. Upload result and clean up temporary file (REAL UPLOAD)
             const finalVideoUrl = await cleanupTempFile(tempFilePath);
             await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 90);
 
-            // 5. Set final completion status.
+            // 5. Set final completion status and save the real video URL.
             await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
         } catch (error) {
