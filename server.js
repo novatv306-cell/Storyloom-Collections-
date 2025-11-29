@@ -99,10 +99,6 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
 
     } catch (e) {
         console.error(`[STORAGE] UPLOAD ERROR for job ${scriptId}:`, e.message);
-        // This log is critical if the Supabase client library is missing.
-        if (e.message.includes('createClient')) {
-            console.error("CRITICAL: The @supabase/supabase-js library may not be installed in your Render environment.");
-        }
         throw e; 
     }
     
