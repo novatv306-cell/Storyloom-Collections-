@@ -20,6 +20,11 @@ const STATUS_IN_PROGRESS = 'PROCESSING_RENDER';
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
+// Placeholder URLs for proof of concept
+// In a real app, these would be dynamic based on videoData or saved in Supabase Storage.
+const LOGO_URL = 'https://placehold.co/150x150/191970/FFFFFF.png?text=LOGO';
+const CAPTION_IMAGE_URL = 'https://placehold.co/1280x100/000000/FFFFFF.png?text=Your+Dynamic+Caption+Here'; 
+
 // Initialize Supabase Client
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } }) 
@@ -88,16 +93,25 @@ function buildFFmpegCommand(videoData) {
     const scriptId = videoData.id || uuidv4();
     const outputFileName = `output_${scriptId}.mp4`;
     const tempFilePath = path.join('/tmp', outputFileName);
-    const videoDuration = videoData.total_duration || 5; 
-    const captionImageUrl = 'https://placehold.co/1280x100/000000/000000.png'; 
     
-    console.log(`[WORKER] Generating COMMAND for Job ${scriptId} for full duration ${videoDuration}s.`);
+    // Use a default of 5 seconds if duration is corrupt or missing (prevents crash)
+    const videoDuration = videoData.total_duration || 5; 
+    
+    console.log(`[WORKER] Generating COMMAND for Job ${scriptId} for full duration ${videoDuration}s (Content Type: ${videoData.content_type}).`);
     
     const args = [
         '-f', 'lavfi',
-        '-i', `color=c=blue:s=1280x720:d=${videoDuration}`, 
-        '-i', captionImageUrl, 
-        '-filter_complex', '[0][1]overlay=x=0:y=H-h[v]', 
+        '-i', `color=c=blue:s=1280x720:d=${videoDuration}`, // [0] Background Video/Color
+        '-i', LOGO_URL, // [1] Logo Image (The one you want at the beginning)
+        '-i', CAPTION_IMAGE_URL, // [2] Caption Image (The one you want at the bottom)
+        
+        // Filter Complex: 
+        // 1. Overlay the Logo [1] onto the Background [0] -> Output stream [v1]
+        //    (Logo placed at top-left corner, x=10, y=10)
+        // 2. Overlay the Caption [2] onto stream [v1] -> Output stream [v]
+        //    (Caption placed at the bottom, y=H-h)
+        '-filter_complex', '[0][1]overlay=x=10:y=10[v1]; [v1][2]overlay=x=0:y=H-h[v]', 
+        
         '-map', '[v]', 
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv444p',
@@ -149,9 +163,10 @@ async function processJob(job) {
     const scriptId = job.id;
     let tempFilePath = '';
     
-    // --- CRITICAL DEFENSIVE CHECK ---
-    if (!job.script_data || typeof job.script_data.total_duration === 'undefined' || job.script_data.total_duration === null) {
-        const errorMsg = `Corrupt data for job ${scriptId}. Missing required 'script_data' or 'total_duration'. Marking as FAILED.`;
+    // --- CRITICAL DEFENSIVE CHECK (Handles corrupt or missing duration) ---
+    if (!job.script_data) {
+        // We can't proceed without script_data, so we must fail it out.
+        const errorMsg = `Job ${scriptId} data is missing. Marking as FAILED.`;
         console.error(`[WORKER] Job ${scriptId} failed:`, errorMsg);
         await updateJobStatus(scriptId, STATUS_FAILED, 0, errorMsg);
         isProcessingJob = false;
@@ -160,7 +175,10 @@ async function processJob(job) {
     // ------------------------------------------
 
     try {
-        console.log(`[WORKER] Starting job ${scriptId}. Total Duration: ${job.script_data.total_duration}s`);
+        // Use the total_duration, or default to 5 seconds to prevent crash
+        const duration = job.script_data.total_duration || 5; 
+        console.log(`[WORKER] Starting job ${scriptId}. Total Duration: ${duration}s`);
+        
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
         
         const commandData = buildFFmpegCommand(job.script_data);
@@ -175,7 +193,9 @@ async function processJob(job) {
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
         const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
-
+        
+        // The worker updates the status *only*. The client is responsible for reading the 
+        // 'content_type' field and displaying the correct tag on its UI.
         await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
     } catch (error) {
@@ -188,16 +208,13 @@ async function processJob(job) {
 
 async function fetchAndProcessJobs() {
     if (isProcessingJob) {
-        // Log only if the processor is busy
         console.log("[WORKER] Processor busy. Skipping check.");
         return;
     }
     
-    // NOTE: The constant 'Checking for PENDING jobs...' log has been removed here.
-    
     const { data: jobs, error } = await supabase
         .from(SUPABASE_TABLE_NAME)
-        .select(`id, ${VIDEO_DATA_COLUMN_NAME}`)
+        .select(`id, ${VIDEO_DATA_COLUMN_NAME}, content_type`)
         .eq('status', STATUS_PENDING) 
         .limit(1);
 
@@ -207,8 +224,7 @@ async function fetchAndProcessJobs() {
     }
 
     if (jobs && jobs.length > 0) {
-        // Only log when a job is actually found
-        console.log(`[WORKER] Found PENDING job ${jobs[0].id}. Initiating process.`);
+        console.log(`[WORKER] Found PENDING job ${jobs[0].id} (Type: ${jobs[0].content_type}). Initiating process.`);
         await processJob(jobs[0]); 
     }
 }
@@ -238,7 +254,8 @@ app.post('/render', async (req, res) => {
         title: videoData.title || "Untitled Video",
         full_script: fullScriptText, 
         environment_tag: videoData.animation_style || "2D", 
-        content_type: videoData.content_type || "cartoon",
+        // Crucial for the Live Action/Cartoon distinction
+        content_type: videoData.content_type || "cartoon", 
         main_character_names: videoData.script_analysis?.mainCharacters || [] 
     };
     payload[VIDEO_DATA_COLUMN_NAME] = videoData;
