@@ -31,7 +31,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 }
 
 // =========================================================
-// === WORKER UTILITIES (Merged from worker.js) =============
+// === WORKER UTILITIES ====================================
 // =========================================================
 
 async function uploadVideoToStorage(scriptId, tempFilePath) {
@@ -153,7 +153,6 @@ async function processJob(job) {
     if (!job.script_data || typeof job.script_data.total_duration === 'undefined' || job.script_data.total_duration === null) {
         const errorMsg = `Corrupt data for job ${scriptId}. Missing required 'script_data' or 'total_duration'. Marking as FAILED.`;
         console.error(`[WORKER] Job ${scriptId} failed:`, errorMsg);
-        // Ensure we update status so this job doesn't keep crashing the loop
         await updateJobStatus(scriptId, STATUS_FAILED, 0, errorMsg);
         isProcessingJob = false;
         return;
@@ -189,11 +188,12 @@ async function processJob(job) {
 
 async function fetchAndProcessJobs() {
     if (isProcessingJob) {
+        // Log only if the processor is busy
         console.log("[WORKER] Processor busy. Skipping check.");
         return;
     }
     
-    console.log(`[WORKER] Checking for ${STATUS_PENDING} jobs...`);
+    // NOTE: The constant 'Checking for PENDING jobs...' log has been removed here.
     
     const { data: jobs, error } = await supabase
         .from(SUPABASE_TABLE_NAME)
@@ -207,6 +207,8 @@ async function fetchAndProcessJobs() {
     }
 
     if (jobs && jobs.length > 0) {
+        // Only log when a job is actually found
+        console.log(`[WORKER] Found PENDING job ${jobs[0].id}. Initiating process.`);
         await processJob(jobs[0]); 
     }
 }
