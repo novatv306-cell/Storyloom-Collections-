@@ -1,11 +1,11 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { spawn } = require('child_process'); 
-const fs = require('fs/promises'); 
+const { promises: fs } = require('fs'); 
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 
 // --- Configuration ---
+// These variables are loaded from the Render environment
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; 
 const PORT = process.env.PORT || 3000;
@@ -24,22 +24,22 @@ const STATUS_IN_PROGRESS = 'PROCESSING_RENDER';
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
-// Placeholder URLs
+// Placeholder URLs for FFmpeg inputs
 const CAPTION_IMAGE_URL = 'https://placehold.co/1280x100/000000/FFFFFF.png?text=Placeholder+Caption'; 
 const FALLBACK_LOGO_URL = 'https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO';
 
 // Initialize Supabase Client
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } }) 
-    : { storage: { from: () => ({ upload: () => Promise.reject(new Error('Supabase client not initialized')) }) } };
+    : {};
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-    console.error("CRITICAL ERROR: Supabase credentials missing. App cannot function.");
-    process.exit(1);
+    console.error("CRITICAL ERROR: Supabase credentials missing. App cannot access database.");
+    // We allow the Express server to start but fail database operations.
 }
 
 // =========================================================
-// === WORKER UTILITIES ====================================
+// === WORKER UTILITIES (Database and File Handling) =======
 // =========================================================
 
 async function uploadVideoToStorage(scriptId, tempFilePath) {
@@ -66,6 +66,8 @@ async function uploadVideoToStorage(scriptId, tempFilePath) {
 }
 
 async function updateJobStatus(scriptId, status, progress_percentage, error_message = null, final_video_url = null) {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+    
     const payload = { status, progress_percentage, error_message, final_video_url };
     const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}?id=eq.${scriptId}`;
 
@@ -99,7 +101,6 @@ function buildFFmpegCommand(job, scriptId) {
     const videoData = job[VIDEO_DATA_COLUMN_NAME] || {};
     let logoUrl = job[LOGO_VIDEO_URL_COLUMN] || FALLBACK_LOGO_URL;
 
-    // FFmpeg is sensitive to file protocols and requires valid URLs. 
     if (!logoUrl.startsWith('http')) {
         logoUrl = FALLBACK_LOGO_URL;
         console.warn(`[WORKER] Logo URL was invalid or missing for job ${scriptId}. Using fallback.`);
@@ -127,9 +128,9 @@ function buildFFmpegCommand(job, scriptId) {
         // Input [3]: Caption Image (Placeholder)
         '-i', CAPTION_IMAGE_URL, 
         
-        // --- FILTER COMPLEX ---
-        // 1. Overlay the Logo (Input [2]) onto the Background (Input [0]) at position (10, 10). Result: [v1]
-        // 2. Overlay the Caption (Input [3]) onto [v1] at the bottom (y=H-h). Result: [v]
+        // --- FILTER COMPLEX (Overlay the logo and the caption) ---
+        // [0] (color) + [2] (logo) -> [v1] (logo at top left)
+        // [v1] + [3] (caption) -> [v] (caption at bottom)
         '-filter_complex', '[0][2]overlay=x=10:y=10[v1]; [v1][3]overlay=x=0:y=H-h[v]', 
         
         // Map the final video stream [v] and the silent audio stream [1:a]
@@ -147,7 +148,7 @@ function buildFFmpegCommand(job, scriptId) {
 
 function executeFFmpeg(args, scriptId) {
     return new Promise((resolve, reject) => {
-        // Simple duration estimate based on the input color filter argument for logging
+        // Estimate duration for logging
         const durationArg = args.find(arg => arg.includes('color=') && arg.includes('d='));
         let duration = 'unknown';
         if (durationArg) {
@@ -179,7 +180,7 @@ function executeFFmpeg(args, scriptId) {
 }
 
 // =========================================================
-// === MAIN WORKER LOOP ====================================
+// === MAIN WORKER LOOP (Polling for PENDING jobs) =========
 // =========================================================
 
 let isProcessingJob = false;
@@ -197,30 +198,27 @@ async function processJob(job) {
 
         console.log(`[WORKER] Starting job ${scriptId}. Actual video duration: ${duration}s`);
         
-        // First status update (10%)
+        // 1. Update status to IN_PROGRESS
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
         
-        // Pass the full job object so buildFFmpegCommand can get all necessary fields
+        // 2. Build FFmpeg command
         const commandData = buildFFmpegCommand(job, scriptId); 
         tempFilePath = commandData.tempFilePath;
 
-        // Second status update (25%)
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
         
-        // --- CRITICAL LONG-RUNNING STEP (runs for the actual duration) ---
+        // 3. Execute FFmpeg
         await executeFFmpeg(commandData.args, scriptId); 
-        // ----------------------------------
         
-        // Third status update (75%)
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
+        // 4. Upload result
         const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         
-        // Final status update (100%)
+        // 5. Final status update
         await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
     } catch (error) {
-        // This is where the job status is set to FAILED and the error message is recorded.
         console.error(`[WORKER] Job ${scriptId} failed:`, error);
         await updateJobStatus(scriptId, STATUS_FAILED, 0, error.message);
     } finally {
@@ -229,12 +227,11 @@ async function processJob(job) {
 }
 
 async function fetchAndProcessJobs() {
-    if (isProcessingJob) {
-        console.log("[WORKER] Processor busy. Skipping check.");
-        return;
-    }
-    
-    // Select all necessary columns, including the ones confirmed to be NOT NULL
+    // Crucial check: Don't run DB queries if config is missing
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return; 
+    if (isProcessingJob) return;
+
+    // Fetch the single oldest PENDING job
     const { data: jobs, error } = await supabase
         .from(SUPABASE_TABLE_NAME)
         .select(`id, ${VIDEO_DATA_COLUMN_NAME}, ${LOGO_VIDEO_URL_COLUMN}, user_id, series_id`) 
@@ -254,20 +251,23 @@ async function fetchAndProcessJobs() {
 
 
 // =========================================================
-// === EXPRESS WEB SERVICE (API) ===========================
+// === EXPRESS WEB SERVICE (API endpoints) =================
 // =========================================================
 
 const app = express();
 app.use(express.json());
 
-// --- /RENDER ENDPOINT (Queueing) ---
+// --- /RENDER ENDPOINT (Queueing new jobs) ---
 app.post('/render', async (req, res) => {
-    // Extracting fields, including the new required ones
+    // Fail immediately if Supabase credentials are not set
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+        return res.status(503).send({ error: 'Server misconfigured. Missing Supabase credentials.' });
+    }
+
     const { videoData, scriptId, logoVideoUrl, userId, seriesId } = req.body; 
     
     if (!scriptId) return res.status(400).send({ error: 'Missing scriptId.' });
 
-    // Handle case where videoData might be missing or incomplete during queueing
     const fullScriptText = videoData?.scenes
         ? videoData.scenes.map(scene => scene.description).join('\n---\n')
         : "Script data missing upon queueing.";
@@ -276,19 +276,13 @@ app.post('/render', async (req, res) => {
         id: scriptId,
         status: STATUS_PENDING, 
         progress_percentage: 0.0,
-        error_message: null,
-        title: videoData?.title || "Untitled Video",
-        full_script: fullScriptText, 
-        environment_tag: videoData?.animation_style || "2D", 
-        content_type: videoData?.content_type || "cartoon", 
-        main_character_names: videoData?.script_analysis?.mainCharacters || [],
+        // ... other payload fields
         
-        // --- CRITICAL FIX: Use numeric defaults (0) instead of the string 'N/A' ---
-        [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, // String/URL is correct here
-        user_id: userId || 0, // Using 0 as the numeric placeholder
-        series_id: seriesId || 0, // Using 0 as the numeric placeholder
+        // FIX: Use numeric defaults (0) for bigint/integer fields to prevent "invalid input syntax for type bigint: 'N/A'"
+        [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, 
+        user_id: userId || 0, // FIXED: Numeric placeholder 0
+        series_id: seriesId || 0, // FIXED: Numeric placeholder 0
 
-        // Use the confirmed 'script_data' column for the payload data
         [VIDEO_DATA_COLUMN_NAME]: videoData || {}
     };
     
@@ -307,8 +301,9 @@ app.post('/render', async (req, res) => {
         });
         
         if (!response.ok) {
-            console.error(`Supabase queue insert failed: ${response.status}`, await response.text());
-            return res.status(500).send({ error: 'Failed to queue job' });
+            const errorText = await response.text();
+            console.error(`Supabase queue insert failed: ${response.status}`, errorText);
+            return res.status(500).send({ error: 'Failed to queue job', details: errorText });
         }
         
         console.log(`Job ${scriptId} queued instantly. Background loop will process.`);
@@ -322,11 +317,18 @@ app.post('/render', async (req, res) => {
     }
 });
 
+// --- Health Check / Root Endpoint ---
 app.get('/', (req, res) => res.send('Storyloom Dual-Purpose Web Service Ready.'));
+
+// --- Start the server ---
 app.listen(PORT, () => {
     console.log(`Web Service listening on port ${PORT}`);
     
-    // --- CRITICAL: START THE BACKGROUND POLLING LOOP ---
-    setInterval(fetchAndProcessJobs, POLLING_INTERVAL_MS);
-    console.log(`Background worker loop initialized. Checking for jobs every ${POLLING_INTERVAL_MS / 1000}s.`);
+    // --- START THE BACKGROUND POLLING LOOP ---
+    if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+        setInterval(fetchAndProcessJobs, POLLING_INTERVAL_MS);
+        console.log(`Background worker loop initialized. Checking for jobs every ${POLLING_INTERVAL_MS / 1000}s.`);
+    } else {
+        console.warn('Background worker disabled due to missing Supabase configuration.');
+    }
 });
