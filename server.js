@@ -317,10 +317,3 @@ app.listen(PORT, () => {
         console.warn('Background worker disabled due to missing Supabase configuration.');
     }
 });
-
-### Next Steps (Critical)
-
-1.  **Use the code above to update and redeploy your service.** This is the one that fixes the BigInt error.
-2.  **Submit a new job.** This time, the job should successfully queue, be picked up by the worker, run the simple black screen FFmpeg command, and complete, updating the database status to `RENDERING_COMPLETE` and providing a link to the video file (the black screen).
-
-**Once that simple job succeeds,** you can send me your complete, complex FFmpeg command, and we will insert it into the `buildFFmpegCommand` function to finally generate your animated content.
