@@ -23,11 +23,10 @@ const STATUS_IN_PROGRESS = 'PROCESSING_RENDER';
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
-const CAPTION_IMAGE_URL = '[https://placehold.co/1280x100/000000/FFFFFF.png?text=Placeholder+Caption](https://placehold.co/1280x100/000000/FFFFFF.png?text=Placeholder+Caption)'; 
-const FALLBACK_LOGO_URL = '[https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO](https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO)';
+const FALLBACK_LOGO_URL = 'https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO';
 
-// CRITICAL FIX: Use a valid, constant UUID placeholder for NOT NULL UUID columns
-const PLACEHOLDER_UUID = '00000000-0000-0000-0000-000000000000';
+// CRITICAL FIX: Use 0 (an integer) as a placeholder for database columns identified as 'bigint' (user_id, series_id)
+const PLACEHOLDER_ID = 0; 
 
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } }) 
@@ -121,16 +120,12 @@ function executeFFmpeg(args, scriptId) {
 /**
  * FINAL FFmpeg COMMAND GENERATION
  * This function is where you will insert your complex animation logic.
+ * * NOTE: The current 'args' array uses a simple black screen and silent audio. 
+ * This is TEMPORARY to ensure the database and upload pipeline is stable.
  */
 function buildFFmpegCommand(job, scriptId) {
     const videoData = job[VIDEO_DATA_COLUMN_NAME] || {};
-    let logoUrl = job[LOGO_VIDEO_URL_COLUMN] || FALLBACK_LOGO_URL;
-
-    if (!logoUrl.startsWith('http')) {
-        logoUrl = FALLBACK_LOGO_URL;
-        console.warn(`[WORKER] Logo URL was invalid or missing for job ${scriptId}. Using fallback.`);
-    }
-
+    
     // Default duration is 60 seconds if not specified in the job data.
     const DEFAULT_DURATION = 60; 
     const duration = videoData.total_duration && !isNaN(videoData.total_duration) && videoData.total_duration > 0 ? videoData.total_duration : DEFAULT_DURATION; 
@@ -141,35 +136,26 @@ function buildFFmpegCommand(job, scriptId) {
     console.log(`[WORKER] Building FFmpeg Command for Job ${scriptId}. FINAL VIDEO DURATION: ${duration}s.`);
     
     // =========================================================================
-    // === PLACEHOLDER FOR YOUR COMPLEX ANIMATION FFmpeg LOGIC =================
+    // === TEMPORARILY SIMPLIFIED FFmpeg COMMAND (Black Screen + Silent Audio) =
     // >>>>>>>>>>>>>> REPLACE THIS ENTIRE 'args' ARRAY BELOW <<<<<<<<<<<<<<<<<<<
     // =========================================================================
     
     const args = [
-        // Input [0]: Green background that pulses in color
+        // Input [0]: Black background (guaranteed to work locally)
         '-f', 'lavfi',
-        '-i', `color=c=green@${duration / 60}:s=1280x720:d=${duration}`, 
+        '-i', `color=c=black:s=1280x720:d=${duration}`, 
         
         // Input [1]: Silent audio stream (MANDATORY for playable video)
         '-f', 'lavfi',
         '-i', `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}`, 
         
-        // Input [2]: Logo Video/Image
-        '-i', logoUrl, 
-        
-        // Input [3]: Caption Image (Placeholder)
-        '-i', CAPTION_IMAGE_URL, 
-        
-        // Filter: Overlay the Logo (2) and Caption (3) onto the background (0)
-        '-filter_complex', '[0][2]overlay=x=10:y=10[v1]; [v1][3]overlay=x=0:y=H-h[v]', 
-        
-        // Map streams
-        '-map', '[v]', 
-        '-map', '1:a', 
+        // Map streams - only mapping the two successful inputs (0 and 1)
+        '-map', '0:v', // Map video from input 0
+        '-map', '1:a', // Map audio from input 1
         
         // Output settings
         '-c:v', 'libx264',
-        '-pix_fmt', 'yuv444p',
+        '-pix_fmt', 'yuv420p',
         '-y', 
         tempFilePath 
     ];
@@ -277,10 +263,10 @@ app.post('/render', async (req, res) => {
         content_type: videoData?.content_type || "cartoon", 
         main_character_names: videoData?.script_analysis?.mainCharacters || [],
         
-        // CRITICAL FIX: Ensures non-NULL UUIDs for database
+        // CRITICAL FIX: Ensures non-NULL BigInts (using 0) for database
         [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, 
-        user_id: userId || PLACEHOLDER_UUID, 
-        series_id: seriesId || PLACEHOLDER_UUID, 
+        user_id: userId || PLACEHOLDER_ID, // NOW uses the integer 0
+        series_id: seriesId || PLACEHOLDER_ID, // NOW uses the integer 0
 
         [VIDEO_DATA_COLUMN_NAME]: videoData || {}
     };
@@ -331,3 +317,10 @@ app.listen(PORT, () => {
         console.warn('Background worker disabled due to missing Supabase configuration.');
     }
 });
+
+### Next Steps (Critical)
+
+1.  **Use the code above to update and redeploy your service.** This is the one that fixes the BigInt error.
+2.  **Submit a new job.** This time, the job should successfully queue, be picked up by the worker, run the simple black screen FFmpeg command, and complete, updating the database status to `RENDERING_COMPLETE` and providing a link to the video file (the black screen).
+
+**Once that simple job succeeds,** you can send me your complete, complex FFmpeg command, and we will insert it into the `buildFFmpegCommand` function to finally generate your animated content.
