@@ -283,10 +283,10 @@ app.post('/render', async (req, res) => {
         content_type: videoData?.content_type || "cartoon", 
         main_character_names: videoData?.script_analysis?.mainCharacters || [],
         
-        // Setting required NOT NULL fields with defensive defaults if client misses them
-        [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, // Use fallback URL
-        user_id: userId || 'N/A', // Use a placeholder string if missing
-        series_id: seriesId || 'N/A', // Use a placeholder string if missing
+        // --- CRITICAL FIX: Use numeric defaults (0) instead of the string 'N/A' ---
+        [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, // String/URL is correct here
+        user_id: userId || 0, // Using 0 as the numeric placeholder
+        series_id: seriesId || 0, // Using 0 as the numeric placeholder
 
         // Use the confirmed 'script_data' column for the payload data
         [VIDEO_DATA_COLUMN_NAME]: videoData || {}
