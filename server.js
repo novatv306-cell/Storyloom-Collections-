@@ -24,7 +24,7 @@ const STATUS_IN_PROGRESS = 'PROCESSING_RENDER';
 const STATUS_COMPLETED = 'RENDERING_COMPLETE'; 
 const STATUS_FAILED = 'FAILED'; 
 
-// Placeholder URLs for missing data (should ideally be supplied by DB)
+// Placeholder URLs
 const CAPTION_IMAGE_URL = 'https://placehold.co/1280x100/000000/FFFFFF.png?text=Placeholder+Caption'; 
 const FALLBACK_LOGO_URL = 'https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO';
 
@@ -93,20 +93,24 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 /**
- * Replaces the non-functional placeholder with a functional FFmpeg command 
- * that creates a blue video of the correct length with the logo overlaid.
+ * Creates a playable FFmpeg command for the correct duration with a logo overlay.
  */
 function buildFFmpegCommand(job, scriptId) {
-    // Get data safely using confirmed column names
     const videoData = job[VIDEO_DATA_COLUMN_NAME] || {};
-    const logoUrl = job[LOGO_VIDEO_URL_COLUMN] || FALLBACK_LOGO_URL;
+    let logoUrl = job[LOGO_VIDEO_URL_COLUMN] || FALLBACK_LOGO_URL;
+
+    // FFmpeg is sensitive to file protocols and requires valid URLs. 
+    if (!logoUrl.startsWith('http')) {
+        logoUrl = FALLBACK_LOGO_URL;
+        console.warn(`[WORKER] Logo URL was invalid or missing for job ${scriptId}. Using fallback.`);
+    }
 
     // Use total_duration from the JSON data, falling back to a minimum of 5s.
     const duration = videoData.total_duration && !isNaN(videoData.total_duration) && videoData.total_duration > 0 ? videoData.total_duration : 5; 
     const outputFileName = `output_${scriptId}.mp4`;
     const tempFilePath = path.join('/tmp', outputFileName);
     
-    console.log(`[WORKER] Generating COMMAND for Job ${scriptId}. Target Duration: ${duration}s. Logo URL: ${logoUrl}`);
+    console.log(`[WORKER] Building FFmpeg Command for Job ${scriptId}. Duration: ${duration}s. Logo URL: ${logoUrl}`);
     
     const args = [
         // Input [0]: Blue background video stream
@@ -193,25 +197,30 @@ async function processJob(job) {
 
         console.log(`[WORKER] Starting job ${scriptId}. Actual video duration: ${duration}s`);
         
+        // First status update (10%)
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
         
         // Pass the full job object so buildFFmpegCommand can get all necessary fields
         const commandData = buildFFmpegCommand(job, scriptId); 
         tempFilePath = commandData.tempFilePath;
 
+        // Second status update (25%)
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
         
         // --- CRITICAL LONG-RUNNING STEP (runs for the actual duration) ---
         await executeFFmpeg(commandData.args, scriptId); 
         // ----------------------------------
         
+        // Third status update (75%)
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
         const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         
+        // Final status update (100%)
         await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
     } catch (error) {
+        // This is where the job status is set to FAILED and the error message is recorded.
         console.error(`[WORKER] Job ${scriptId} failed:`, error);
         await updateJobStatus(scriptId, STATUS_FAILED, 0, error.message);
     } finally {
@@ -225,10 +234,10 @@ async function fetchAndProcessJobs() {
         return;
     }
     
-    // Select all necessary columns: ID, script_data, and logo_video_url
+    // Select all necessary columns, including the ones confirmed to be NOT NULL
     const { data: jobs, error } = await supabase
         .from(SUPABASE_TABLE_NAME)
-        .select(`id, ${VIDEO_DATA_COLUMN_NAME}, ${LOGO_VIDEO_URL_COLUMN}`) 
+        .select(`id, ${VIDEO_DATA_COLUMN_NAME}, ${LOGO_VIDEO_URL_COLUMN}, user_id, series_id`) 
         .eq('status', STATUS_PENDING) 
         .limit(1);
 
@@ -253,7 +262,9 @@ app.use(express.json());
 
 // --- /RENDER ENDPOINT (Queueing) ---
 app.post('/render', async (req, res) => {
-    const { videoData, scriptId, logoVideoUrl } = req.body; 
+    // Extracting fields, including the new required ones
+    const { videoData, scriptId, logoVideoUrl, userId, seriesId } = req.body; 
+    
     if (!scriptId) return res.status(400).send({ error: 'Missing scriptId.' });
 
     // Handle case where videoData might be missing or incomplete during queueing
@@ -271,10 +282,15 @@ app.post('/render', async (req, res) => {
         environment_tag: videoData?.animation_style || "2D", 
         content_type: videoData?.content_type || "cartoon", 
         main_character_names: videoData?.script_analysis?.mainCharacters || [],
-        [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl 
+        
+        // Setting required NOT NULL fields with defensive defaults if client misses them
+        [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, // Use fallback URL
+        user_id: userId || 'N/A', // Use a placeholder string if missing
+        series_id: seriesId || 'N/A', // Use a placeholder string if missing
+
+        // Use the confirmed 'script_data' column for the payload data
+        [VIDEO_DATA_COLUMN_NAME]: videoData || {}
     };
-    // Use the confirmed 'script_data' column for the payload data
-    payload[VIDEO_DATA_COLUMN_NAME] = videoData || {};
     
     const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE_NAME}`;
 
