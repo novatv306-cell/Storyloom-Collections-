@@ -3,9 +3,9 @@ const { createClient } = require('@supabase/supabase-js');
 const { spawn } = require('child_process'); 
 const { promises: fs } = require('fs'); 
 const path = require('path');
+// const { v4: uuidv4 } = require('uuid'); // Not needed if we use a constant placeholder UUID
 
 // --- Configuration ---
-// These variables are loaded from the Render environment
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; 
 const PORT = process.env.PORT || 3000;
@@ -17,7 +17,7 @@ const SUPABASE_STORAGE_BUCKET = 'generated-content';
 const VIDEO_DATA_COLUMN_NAME = 'script_data'; 
 const LOGO_VIDEO_URL_COLUMN = 'logo_video_url'; 
 
-const POLLING_INTERVAL_MS = 5000; // Check for new jobs every 5 seconds
+const POLLING_INTERVAL_MS = 5000; 
 
 const STATUS_PENDING = 'PENDING'; 
 const STATUS_IN_PROGRESS = 'PROCESSING_RENDER'; 
@@ -28,6 +28,9 @@ const STATUS_FAILED = 'FAILED';
 const CAPTION_IMAGE_URL = 'https://placehold.co/1280x100/000000/FFFFFF.png?text=Placeholder+Caption'; 
 const FALLBACK_LOGO_URL = 'https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO';
 
+// --- CRITICAL FIX: Use a valid, constant UUID placeholder for NOT NULL UUID columns ---
+const PLACEHOLDER_UUID = '00000000-0000-0000-0000-000000000000';
+
 // Initialize Supabase Client
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } }) 
@@ -35,7 +38,6 @@ const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
     console.error("CRITICAL ERROR: Supabase credentials missing. App cannot access database.");
-    // We allow the Express server to start but fail database operations.
 }
 
 // =========================================================
@@ -198,24 +200,22 @@ async function processJob(job) {
 
         console.log(`[WORKER] Starting job ${scriptId}. Actual video duration: ${duration}s`);
         
-        // 1. Update status to IN_PROGRESS
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
         
-        // 2. Build FFmpeg command
         const commandData = buildFFmpegCommand(job, scriptId); 
         tempFilePath = commandData.tempFilePath;
 
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
         
-        // 3. Execute FFmpeg
+        // Execute FFmpeg
         await executeFFmpeg(commandData.args, scriptId); 
         
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
-        // 4. Upload result
+        // Upload result
         const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         
-        // 5. Final status update
+        // Final status update
         await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
     } catch (error) {
@@ -227,7 +227,6 @@ async function processJob(job) {
 }
 
 async function fetchAndProcessJobs() {
-    // Crucial check: Don't run DB queries if config is missing
     if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return; 
     if (isProcessingJob) return;
 
@@ -259,7 +258,6 @@ app.use(express.json());
 
 // --- /RENDER ENDPOINT (Queueing new jobs) ---
 app.post('/render', async (req, res) => {
-    // Fail immediately if Supabase credentials are not set
     if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
         return res.status(503).send({ error: 'Server misconfigured. Missing Supabase credentials.' });
     }
@@ -276,12 +274,16 @@ app.post('/render', async (req, res) => {
         id: scriptId,
         status: STATUS_PENDING, 
         progress_percentage: 0.0,
-        // ... other payload fields
+        title: videoData?.title || "Untitled Video",
+        full_script: fullScriptText, 
+        environment_tag: videoData?.animation_style || "2D", 
+        content_type: videoData?.content_type || "cartoon", 
+        main_character_names: videoData?.script_analysis?.mainCharacters || [],
         
-        // FIX: Use numeric defaults (0) for bigint/integer fields to prevent "invalid input syntax for type bigint: 'N/A'"
+        // --- CRITICAL FIX: Use UUID placeholder for NOT NULL UUID columns ---
         [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, 
-        user_id: userId || 0, // FIXED: Numeric placeholder 0
-        series_id: seriesId || 0, // FIXED: Numeric placeholder 0
+        user_id: userId || PLACEHOLDER_UUID, // FIXED: Using constant UUID
+        series_id: seriesId || PLACEHOLDER_UUID, // FIXED: Using constant UUID
 
         [VIDEO_DATA_COLUMN_NAME]: videoData || {}
     };
