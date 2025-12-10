@@ -25,9 +25,6 @@ const STATUS_FAILED = 'FAILED';
 
 const FALLBACK_LOGO_URL = 'https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO';
 
-// CRITICAL FIX: Use 0 (an integer) as a placeholder for database columns identified as 'bigint' (user_id, series_id)
-const PLACEHOLDER_ID = 0; 
-
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } }) 
     : {};
@@ -94,6 +91,7 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 
 function executeFFmpeg(args, scriptId) {
     return new Promise((resolve, reject) => {
+        // Ensure FFmpeg is available in the environment path
         const ffmpeg = spawn('ffmpeg', args); 
         let stderr = '';
         
@@ -263,10 +261,10 @@ app.post('/render', async (req, res) => {
         content_type: videoData?.content_type || "cartoon", 
         main_character_names: videoData?.script_analysis?.mainCharacters || [],
         
-        // CRITICAL FIX: Ensures non-NULL BigInts (using 0) for database
+        // FIX: Ensure UUID fields (user_id, series_id) are NULL if not provided.
         [LOGO_VIDEO_URL_COLUMN]: logoVideoUrl || FALLBACK_LOGO_URL, 
-        user_id: userId || PLACEHOLDER_ID, // NOW uses the integer 0
-        series_id: seriesId || PLACEHOLDER_ID, // NOW uses the integer 0
+        user_id: userId || null, 
+        series_id: seriesId || null, 
 
         [VIDEO_DATA_COLUMN_NAME]: videoData || {}
     };
