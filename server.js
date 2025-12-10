@@ -3,6 +3,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { spawn } = require('child_process'); 
 const { promises: fs } = require('fs'); 
 const path = require('path');
+const fetch = require('node-fetch'); // Required for downloading external assets
 
 // --- Configuration ---
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -24,6 +25,8 @@ const STATUS_COMPLETED = 'RENDERING_COMPLETE';
 const STATUS_FAILED = 'FAILED'; 
 
 const FALLBACK_LOGO_URL = 'https://placehold.co/100x100/191970/FFFFFF.png?text=LOGO';
+const FALLBACK_MUSIC_URL = 'https://voxlcvvksogqktgxyihm.supabase.co/storage/v1/object/public/music-tracks/1763757139784-Echoes%20in%20the%20Quiet%20.mp3';
+
 
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY 
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } }) 
@@ -36,6 +39,46 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 // =========================================================
 // === WORKER UTILITIES (Database and File Handling) =======
 // =========================================================
+
+/**
+ * Downloads an external asset (video or audio) and saves it to a local temporary file.
+ */
+async function downloadAsset(url, scriptId, assetName) {
+    if (!url) {
+        throw new Error(`[ASSET DOWNLOAD] Missing URL for ${assetName}`);
+    }
+    // Determine file extension from the URL pathname, default to .mp4
+    const urlObject = new URL(url);
+    const extension = path.extname(urlObject.pathname) || '.mp4';
+    const tempFilePath = path.join('/tmp', `${assetName}_${scriptId}${extension}`);
+
+    try {
+        console.log(`[ASSET DOWNLOAD] Downloading ${assetName} from: ${url}`);
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch ${assetName}: ${response.statusText}`);
+        }
+        
+        // Use streaming write for large files
+        const writer = require('fs').createWriteStream(tempFilePath);
+        response.body.pipe(writer);
+
+        return new Promise((resolve, reject) => {
+            writer.on('finish', () => {
+                console.log(`[ASSET DOWNLOAD] Downloaded ${assetName} successfully to ${tempFilePath}`);
+                resolve(tempFilePath);
+            });
+            writer.on('error', (err) => {
+                console.error(`[ASSET DOWNLOAD] Error writing file for ${assetName}: ${err.message}`);
+                reject(new Error(`Failed to save downloaded asset (${assetName}): ${err.message}`));
+            });
+        });
+    } catch (e) {
+        console.error(`[ASSET DOWNLOAD] Error downloading ${assetName}: ${e.message}`);
+        throw new Error(`Failed to download required asset (${assetName}): ${e.message}`);
+    }
+}
+
 
 async function uploadVideoToStorage(scriptId, tempFilePath) {
     const storagePath = `public/${scriptId}.mp4`;
@@ -90,45 +133,62 @@ async function updateJobStatus(scriptId, status, progress_percentage, error_mess
 }
 
 // =================================================================
-// === FFmpeg EXECUTION SIMULATION (to bypass environment block) ===
+// === FFmpeg EXECUTION (Real Command) =============================
 // =================================================================
 
 function executeFFmpeg(args, scriptId, tempFilePath) {
-    return new Promise(async (resolve, reject) => {
-        console.log(`[WORKER] !!! SIMULATION MODE ACTIVE !!! FFmpeg execution simulated for job ${scriptId}.`);
-        console.log(`[WORKER] COMMAND ARGS (ignored in simulation): ${args.join(' ')}`);
+    return new Promise((resolve, reject) => {
+        console.log(`[FFMPEG] Starting real FFmpeg execution for job ${scriptId}.`);
+        console.log(`[FFMPEG] COMMAND: ffmpeg ${args.join(' ')}`);
 
-        // 1. Simulate a render time (5 seconds)
-        await new Promise(r => setTimeout(r, 5000));
-        
-        // 2. Create a dummy MP4 file for the upload step to succeed.
-        // This is a minimal valid MP4 file (a tiny stub of a video).
-        try {
-            const dummyVideoData = Buffer.from([
-                0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00,
-                0x69, 0x73, 0x6f, 0x6d, 0x69, 0x73, 0x6f, 0x32, 0x61, 0x76, 0x63, 0x31, 0x6d, 0x70, 0x34, 0x31
-            ]);
-            await fs.writeFile(tempFilePath, dummyVideoData);
-            console.log(`[WORKER] SIMULATION: Created dummy file at ${tempFilePath}`);
-        } catch (e) {
-            reject(new Error(`Simulation failed to create dummy file: ${e.message}`));
-            return;
-        }
+        // Spawn the FFmpeg process
+        const ffmpeg = spawn('ffmpeg', args);
 
-        console.log(`[WORKER] SIMULATION: FFmpeg Job ${scriptId} finished successfully.`);
-        resolve({ success: true });
+        ffmpeg.stderr.on('data', (data) => {
+            const output = data.toString();
+            // Log non-progress related errors/warnings
+            if (output.includes('error') || output.includes('failed') || output.includes('invalid')) {
+                console.error(`[FFMPEG ERR] ${output.trim()}`);
+            } else if (output.includes('time=')) {
+                // Ignore time progress updates for cleaner logs
+            } else {
+                 // Log other output if needed for debugging the command itself
+                // console.log(`[FFMPEG OUT] ${output.trim()}`);
+            }
+        });
+
+        ffmpeg.on('close', (code) => {
+            if (code === 0) {
+                console.log(`[FFMPEG] FFmpeg Job ${scriptId} finished successfully with code ${code}.`);
+                resolve({ success: true });
+            } else {
+                const errorMessage = `FFmpeg server error: Process exited with code ${code}`;
+                console.error(`[FFMPEG] FAILURE: ${errorMessage}`);
+                reject(new Error(errorMessage));
+            }
+        });
+
+        ffmpeg.on('error', (err) => {
+            const errorMessage = `FFmpeg server error: Failed to start process: ${err.message}`;
+            console.error(`[FFMPEG] CRITICAL FAILURE: ${errorMessage}`);
+            reject(new Error(errorMessage));
+        });
     });
 }
 // ------------------------------------------------------------------
 
 /**
- * FINAL FFmpeg COMMAND GENERATION
- * This is where we will insert your real video logic once the pipeline is confirmed.
+ * PHASE 1: Build command to overlay Logo Video and Background Music onto a Black Video.
+ * @param {object} job - The job data from Supabase.
+ * @param {string} scriptId - The job ID.
+ * @param {string} logoVideoPath - Local path to the downloaded logo video.
+ * @param {string} musicPath - Local path to the downloaded music.
+ * @returns {{args: string[], tempFilePath: string}}
  */
-function buildFFmpegCommand(job, scriptId) {
+function buildFFmpegCommand(job, scriptId, logoVideoPath, musicPath) {
     const videoData = job[VIDEO_DATA_COLUMN_NAME] || {};
     
-    // Default duration is 60 seconds if not specified in the job data.
+    // Default duration is 20 seconds.
     const DEFAULT_DURATION = 20; 
     const duration = videoData.total_duration && !isNaN(videoData.total_duration) && videoData.total_duration > 0 ? videoData.total_duration : DEFAULT_DURATION; 
     
@@ -137,12 +197,38 @@ function buildFFmpegCommand(job, scriptId) {
     
     console.log(`[WORKER] Building FFmpeg Command for Job ${scriptId}. FINAL VIDEO DURATION: ${duration}s.`);
     
-    // Placeholder args array (unused in simulation, but required for structure)
+    // FFmpeg arguments
     const args = [
+        // Input 0: Black background video (main canvas, 1280x720)
         '-f', 'lavfi', '-i', `color=c=black:s=1280x720:d=${duration}`, 
-        '-f', 'lavfi', '-i', `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}`, 
-        '-map', '0:v', '-map', '1:a',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', 
+        
+        // Input 1: Logo Video (for overlay)
+        '-i', logoVideoPath, 
+        
+        // Input 2: Background Music
+        '-i', musicPath, 
+
+        // Filter Complex for video processing (overlaying logo)
+        // [0:v] is the black video input. [1:v] is the logo video input.
+        // We scale the logo video to 100x100, then overlay it on the black background at (10, 10).
+        // [outv] is the final video stream.
+        '-filter_complex', 
+        `[1:v]scale=100:100[logo];[0:v][logo]overlay=x=10:y=10[outv]`,
+
+        // Map the final video stream [outv]
+        '-map', '[outv]',
+        
+        // Map the audio stream (from the music input, index 2). Use shortest to stop audio when video ends.
+        '-map', '2:a', 
+        '-shortest', // Ensure output duration matches the shortest stream (in this case, the video)
+        
+        // Audio/Video encoding parameters
+        '-c:v', 'libx264', 
+        '-pix_fmt', 'yuv420p', 
+        '-c:a', 'aac', 
+        '-b:a', '192k',
+        
+        '-y', // Overwrite output file if it exists
         tempFilePath 
     ];
 
@@ -161,43 +247,63 @@ async function processJob(job) {
     
     const scriptId = job.id;
     let tempFilePath = '';
+    let logoVideoPath = '';
+    let musicPath = '';
     
     try {
         const videoData = job[VIDEO_DATA_COLUMN_NAME] || {}; 
         const duration = videoData.total_duration || 20; 
+        const logoVideoUrl = job[LOGO_VIDEO_URL_COLUMN] || FALLBACK_LOGO_URL;
+        const musicUrl = videoData.background_music || FALLBACK_MUSIC_URL;
 
-        console.log(`[WORKER] Starting job ${scriptId}. Actual video duration: ${duration}s`);
+
+        console.log(`[WORKER] Starting Phase 1: Logo & Music Overlay for job ${scriptId}. Duration: ${duration}s`);
         
-        await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 10);
+        await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 5);
         
-        const commandData = buildFFmpegCommand(job, scriptId); 
+        // 1. Download Assets
+        logoVideoPath = await downloadAsset(logoVideoUrl, scriptId, 'logo_video');
+        musicPath = await downloadAsset(musicUrl, scriptId, 'background_music');
+        
+        await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 15);
+
+        // 2. Build FFmpeg Command
+        const commandData = buildFFmpegCommand(job, scriptId, logoVideoPath, musicPath); 
         tempFilePath = commandData.tempFilePath;
 
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 25);
         
-        // Execute FFmpeg (NOW IN SIMULATION MODE)
+        // 3. Execute FFmpeg (Real Command)
         await executeFFmpeg(commandData.args, scriptId, tempFilePath); 
         
         await updateJobStatus(scriptId, STATUS_IN_PROGRESS, 75);
 
-        // Upload result
+        // 4. Upload result
         const finalVideoUrl = await uploadVideoToStorage(scriptId, tempFilePath);
         
-        // Final status update
+        // 5. Final status update
         await updateJobStatus(scriptId, STATUS_COMPLETED, 100, null, finalVideoUrl);
 
     } catch (error) {
         console.error(`[WORKER] Job ${scriptId} failed:`, error);
-        // Clear the error message for subsequent attempts
-        await updateJobStatus(scriptId, STATUS_FAILED, 0, `Worker failed: ${error.message}`);
+        // Ensure the error message is clean for the database
+        const cleanErrorMessage = error.message.startsWith('FFmpeg server error:') ? error.message : `Worker failed: ${error.message}`;
+        await updateJobStatus(scriptId, STATUS_FAILED, 0, cleanErrorMessage);
     } finally {
         isProcessingJob = false;
+        
+        // Clean up temporary files
+        if (logoVideoPath) { try { await fs.unlink(logoVideoPath); } catch (e) { console.warn(`[CLEANUP] Failed to delete logo: ${e.message}`); } }
+        if (musicPath) { try { await fs.unlink(musicPath); } catch (e) { console.warn(`[CLEANUP] Failed to delete music: ${e.message}`); } }
+        // tempFilePath is cleaned up by uploadVideoToStorage if successful, otherwise it's left for next worker run to clean up
     }
 }
 
 async function fetchAndProcessJobs() {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return; 
     if (isProcessingJob) return;
+    
+    console.log(`[WORKER CORE] Polling... Phase 1 (Logo & Music) active. Waiting for PENDING jobs.`);
 
     // Fetch the single oldest PENDING job
     const { data: jobs, error } = await supabase
